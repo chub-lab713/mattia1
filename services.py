@@ -20,7 +20,7 @@ from database import get_connection
 
 
 EXPENSE_TYPE_OPTIONS = ["Personale", "Condivisa"]
-SPLIT_TYPE_OPTIONS = ["50/50", "Personalizzata"]
+SHARED_SPLIT_OPTIONS = ["equal", "custom"]
 CATEGORY_OPTIONS = [
     "Spesa",
     "Casa",
@@ -85,6 +85,18 @@ def get_usernames() -> list[str]:
             "SELECT username FROM users ORDER BY id ASC"
         ).fetchall()
     return [row["username"] for row in rows]
+
+
+def get_couple_usernames() -> tuple[str, str]:
+    usernames = get_usernames()
+    first = usernames[0] if usernames else "io"
+    second = usernames[1] if len(usernames) > 1 else "compagna"
+    return first, second
+
+
+def get_partner_username(current_username: str) -> str:
+    first, second = get_couple_usernames()
+    return second if current_username == first else first
 
 
 def update_user_profile(
@@ -199,9 +211,12 @@ def validate_expense_data(data: dict) -> list[str]:
         errors.append("Il nome non puo essere vuoto.")
 
     if data["expense_type"] == "Condivisa":
-        share = data.get("my_share_percentage")
-        if share is None or share < 0 or share > 100:
-            errors.append("La percentuale personalizzata deve essere tra 0 e 100.")
+        split_type = data.get("split_type", "equal")
+        split_ratio = data.get("split_ratio", 0.5)
+        if split_type not in SHARED_SPLIT_OPTIONS:
+            errors.append("Il tipo di divisione non e valido.")
+        if split_type == "custom" and (split_ratio is None or split_ratio < 0 or split_ratio > 1):
+            errors.append("La quota personalizzata deve essere tra 0% e 100%.")
 
     return errors
 
@@ -212,11 +227,15 @@ def create_expense(
     name: str,
     category: str,
     description: str,
-    payer: str,
+    paid_by: str,
     expense_type: str,
-    split_type: str | None = None,
-    my_share_percentage: float | None = None,
+    split_type: str = "equal",
+    split_ratio: float = 0.5,
 ) -> None:
+    owner = paid_by if expense_type == "Personale" else None
+    if expense_type == "Personale":
+        split_type = "equal"
+        split_ratio = 1.0
     with get_connection() as connection:
         connection.execute(
             """
@@ -226,12 +245,13 @@ def create_expense(
                 name,
                 category,
                 description,
-                payer,
+                paid_by,
                 expense_type,
+                owner,
                 split_type,
-                my_share_percentage
+                split_ratio
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 expense_date.isoformat(),
@@ -239,10 +259,11 @@ def create_expense(
                 name.strip(),
                 category,
                 description.strip(),
-                payer,
+                paid_by,
                 expense_type,
+                owner,
                 split_type,
-                my_share_percentage,
+                split_ratio,
             ),
         )
 
@@ -267,6 +288,7 @@ def create_income(
     amount: float,
     source: str,
     description: str,
+    owner: str,
 ) -> None:
     with get_connection() as connection:
         connection.execute(
@@ -275,15 +297,17 @@ def create_income(
                 income_date,
                 amount,
                 source,
-                description
+                description,
+                owner
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 income_date.isoformat(),
                 amount,
                 source.strip(),
                 description.strip(),
+                owner,
             ),
         )
 
@@ -295,11 +319,15 @@ def update_expense(
     name: str,
     category: str,
     description: str,
-    payer: str,
+    paid_by: str,
     expense_type: str,
-    split_type: str | None = None,
-    my_share_percentage: float | None = None,
+    split_type: str = "equal",
+    split_ratio: float = 0.5,
 ) -> None:
+    owner = paid_by if expense_type == "Personale" else None
+    if expense_type == "Personale":
+        split_type = "equal"
+        split_ratio = 1.0
     with get_connection() as connection:
         connection.execute(
             """
@@ -310,10 +338,11 @@ def update_expense(
                 name = ?,
                 category = ?,
                 description = ?,
-                payer = ?,
+                paid_by = ?,
                 expense_type = ?,
+                owner = ?,
                 split_type = ?,
-                my_share_percentage = ?,
+                split_ratio = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
@@ -323,10 +352,11 @@ def update_expense(
                 name.strip(),
                 category,
                 description.strip(),
-                payer,
+                paid_by,
                 expense_type,
+                owner,
                 split_type,
-                my_share_percentage,
+                split_ratio,
                 expense_id,
             ),
         )
@@ -348,10 +378,11 @@ def get_expenses() -> pd.DataFrame:
                 name,
                 category,
                 description,
-                payer,
+                paid_by,
                 expense_type,
+                owner,
                 split_type,
-                my_share_percentage,
+                split_ratio,
                 created_at,
                 updated_at
             FROM expenses
@@ -365,11 +396,6 @@ def get_expenses() -> pd.DataFrame:
 
     dataframe["expense_date"] = pd.to_datetime(dataframe["expense_date"])
     dataframe["month_label"] = dataframe["expense_date"].dt.strftime("%Y-%m")
-    dataframe["my_share_amount"] = dataframe.apply(
-        lambda row: _calculate_user_share_amount(row, _get_tracked_usernames()[0]),
-        axis=1,
-    )
-    dataframe["partner_share_amount"] = dataframe["amount"] - dataframe["my_share_amount"]
     return dataframe
 
 
@@ -378,14 +404,8 @@ def get_visible_expenses(dataframe: pd.DataFrame, current_username: str) -> pd.D
         return dataframe.copy()
 
     visible = dataframe[
-        (dataframe["expense_type"] == "Condivisa") | (dataframe["payer"] == current_username)
+        (dataframe["expense_type"] == "Condivisa") | (dataframe["owner"] == current_username)
     ].copy()
-
-    visible["my_share_amount"] = visible.apply(
-        lambda row: _calculate_user_share_amount(row, current_username),
-        axis=1,
-    )
-    visible["partner_share_amount"] = visible["amount"] - visible["my_share_amount"]
     return visible
 
 
@@ -399,6 +419,7 @@ def get_incomes() -> pd.DataFrame:
                 amount,
                 source,
                 description,
+                owner,
                 created_at,
                 updated_at
             FROM incomes
@@ -413,6 +434,12 @@ def get_incomes() -> pd.DataFrame:
     dataframe["income_date"] = pd.to_datetime(dataframe["income_date"])
     dataframe["month_label"] = dataframe["income_date"].dt.strftime("%Y-%m")
     return dataframe
+
+
+def get_visible_incomes(dataframe: pd.DataFrame, current_username: str) -> pd.DataFrame:
+    if dataframe.empty:
+        return dataframe.copy()
+    return dataframe[dataframe["owner"] == current_username].copy()
 
 
 def apply_income_filters(dataframe: pd.DataFrame, month_label: str | None) -> pd.DataFrame:
@@ -436,7 +463,7 @@ def apply_filters(
     if category and category != "Tutte":
         filtered = filtered[filtered["category"] == category]
     if payer and payer != "Tutti":
-        filtered = filtered[filtered["payer"] == payer]
+        filtered = filtered[filtered["paid_by"] == payer]
     if expense_type and expense_type != "Tutte":
         filtered = filtered[filtered["expense_type"] == expense_type]
 
@@ -447,11 +474,12 @@ def build_dashboard_metrics(month_dataframe: pd.DataFrame, current_username: str
     total_month = float(month_dataframe["amount"].sum()) if not month_dataframe.empty else 0.0
 
     my_personal = month_dataframe[
-        (month_dataframe["expense_type"] == "Personale") & (month_dataframe["payer"] == current_username)
+        (month_dataframe["expense_type"] == "Personale") & (month_dataframe["owner"] == current_username)
     ]["amount"].sum()
 
     shared_total = month_dataframe[month_dataframe["expense_type"] == "Condivisa"]["amount"].sum()
-    balance = calculate_balance(month_dataframe, current_username)
+    partner_username = get_partner_username(current_username)
+    balance = compute_balance(current_username, partner_username, month_dataframe)
 
     return {
         "total_month": float(total_month),
@@ -471,8 +499,6 @@ def build_category_summary(dataframe: pd.DataFrame) -> pd.DataFrame:
         .agg(
             totale=("amount", "sum"),
             numero_spese=("id", "count"),
-            quota_mia=("my_share_amount", "sum"),
-            quota_compagna=("partner_share_amount", "sum"),
         )
         .sort_values(by="totale", ascending=False)
     )
@@ -501,25 +527,34 @@ def build_income_vs_expense_summary(incomes: pd.DataFrame, expenses: pd.DataFram
     return summary.sort_values("month_label")
 
 
-def calculate_balance(dataframe: pd.DataFrame, current_username: str) -> float:
-    """Valore positivo: l'altra persona deve soldi a me. Negativo: io devo soldi all'altra persona."""
+def compute_balance(user1: str, user2: str, dataframe: pd.DataFrame) -> float:
+    """Valore positivo: user2 deve soldi a user1. Negativo: user1 deve soldi a user2."""
+    if dataframe.empty:
+        return 0.0
+
     shared = dataframe[dataframe["expense_type"] == "Condivisa"]
     balance = 0.0
 
     for _, row in shared.iterrows():
-        if row["payer"] == current_username:
-            balance += row["partner_share_amount"]
-        else:
-            balance -= row["my_share_amount"]
+        payer_share = _get_payer_share(row)
+        partner_share = float(row["amount"]) * (1 - payer_share)
+        if row["paid_by"] == user1:
+            balance += partner_share
+        elif row["paid_by"] == user2:
+            balance -= partner_share
 
-    return float(balance)
+    return round(float(balance), 2)
 
 
 def get_month_options(dataframe: pd.DataFrame) -> list[str]:
+    current_month = date.today().strftime("%Y-%m")
     if dataframe.empty:
-        return ["Tutti"]
+        return ["Tutti", current_month]
 
-    months = sorted(dataframe["month_label"].dropna().unique().tolist(), reverse=True)
+    months = dataframe["month_label"].dropna().unique().tolist()
+    if current_month not in months:
+        months.append(current_month)
+    months = sorted(months, reverse=True)
     return ["Tutti"] + months
 
 
@@ -549,10 +584,11 @@ def export_expenses_to_csv(dataframe: pd.DataFrame) -> str:
             "name": "Nome",
             "category": "Categoria",
             "description": "Descrizione",
-            "payer": "Pagato da",
+            "paid_by": "Pagato da",
             "expense_type": "Tipo spesa",
-            "split_type": "Tipo divisione",
-            "my_share_percentage": "Percentuale mia quota",
+            "owner": "Proprietario",
+            "split_type": "Divisione",
+            "split_ratio": "Quota pagatore",
         }
     )
 
@@ -565,9 +601,14 @@ def export_expenses_to_csv(dataframe: pd.DataFrame) -> str:
         "Descrizione",
         "Pagato da",
         "Tipo spesa",
-        "Tipo divisione",
-        "Percentuale mia quota",
+        "Proprietario",
+        "Divisione",
+        "Quota pagatore",
     ]
+
+    export_frame["Quota pagatore"] = export_frame["Quota pagatore"].apply(
+        lambda value: f"{int(float(value) * 100)}%"
+    )
 
     buffer = StringIO()
     export_frame[selected_columns].to_csv(buffer, index=False)
@@ -625,13 +666,11 @@ def export_expenses_to_pdf(dataframe: pd.DataFrame) -> bytes:
             11,
         )
         line_one = truncate_text(
-            f"{row['expense_date']} | {row['category']} | {row['payer']} | {row['expense_type']}",
+            f"{row['expense_date']} | {row['category']} | {row['paid_by']} | {row['expense_type']}",
             width - 80,
         )
-        split_label = row["split_type"] if pd.notna(row["split_type"]) else "-"
         line_two = truncate_text(
-            f"Divisione: {split_label} | Quota mia: {format_currency(float(row['my_share_amount']))} | "
-            f"Quota compagna: {format_currency(float(row['partner_share_amount']))}",
+            f"Tipo: {row['expense_type']} | Divisione: {_format_split_label(row)}",
             width - 80,
         )
 
@@ -664,18 +703,24 @@ def format_currency(value: float) -> str:
     return f"€ {formatted_value}"
 
 
-def _calculate_user_share_amount(row: pd.Series, current_username: str) -> float:
-    if row["expense_type"] == "Personale":
-        return row["amount"] if row["payer"] == current_username else 0.0
+def _get_payer_share(row: pd.Series) -> float:
+    if row["expense_type"] != "Condivisa":
+        return 1.0
 
-    share_percentage = row["my_share_percentage"] if pd.notna(row["my_share_percentage"]) else 50
-    if row["payer"] == current_username:
-        return float(row["amount"] - (row["amount"] * share_percentage / 100))
-    return float(row["amount"] * share_percentage / 100)
+    split_type = str(row.get("split_type") or "equal")
+    split_ratio = row.get("split_ratio", 0.5)
+    if pd.isna(split_ratio):
+        split_ratio = 0.5
+
+    if split_type == "custom":
+        return float(split_ratio)
+    return 0.5
 
 
-def _get_tracked_usernames() -> tuple[str, str]:
-    usernames = get_usernames()
-    my_username = usernames[0] if usernames else "io"
-    partner_username = usernames[1] if len(usernames) > 1 else "compagna"
-    return my_username, partner_username
+def _format_split_label(row: pd.Series) -> str:
+    split_type = str(row.get("split_type") or "equal")
+    payer_share = _get_payer_share(row)
+    partner_share = 1 - payer_share
+    if split_type == "custom":
+        return f"Personalizzata {int(payer_share * 100)}% / {int(partner_share * 100)}%"
+    return "50/50"

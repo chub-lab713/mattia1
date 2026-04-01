@@ -53,17 +53,17 @@ def initialize_database() -> None:
                 name TEXT NOT NULL DEFAULT '',
                 category TEXT NOT NULL,
                 description TEXT NOT NULL,
-                payer TEXT NOT NULL,
+                paid_by TEXT NOT NULL,
                 expense_type TEXT NOT NULL CHECK(expense_type IN ('Personale', 'Condivisa')),
-                split_type TEXT,
-                my_share_percentage REAL,
+                owner TEXT,
+                split_type TEXT NOT NULL DEFAULT 'equal',
+                split_ratio REAL NOT NULL DEFAULT 0.5,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
-        _migrate_expenses_table_if_needed(connection)
-        _ensure_expense_name_column(connection)
+        _migrate_expenses_schema_if_needed(connection)
 
         connection.execute(
             """
@@ -73,11 +73,13 @@ def initialize_database() -> None:
                 amount REAL NOT NULL CHECK(amount > 0),
                 source TEXT NOT NULL,
                 description TEXT NOT NULL,
+                owner TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        _ensure_income_owner_column(connection)
 
         users_count = connection.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
         if users_count == 0:
@@ -110,14 +112,23 @@ def initialize_database() -> None:
         connection.execute(
             """
             UPDATE expenses
-            SET payer = CASE
-                WHEN LOWER(payer) = 'io' THEN ?
-                WHEN LOWER(payer) = 'compagna' THEN ?
-                ELSE payer
+            SET paid_by = CASE
+                WHEN LOWER(paid_by) = 'io' THEN ?
+                WHEN LOWER(paid_by) = 'compagna' THEN ?
+                ELSE paid_by
             END
-            WHERE LOWER(payer) IN ('io', 'compagna')
+            WHERE LOWER(paid_by) IN ('io', 'compagna')
             """,
             (primary_username, secondary_username),
+        )
+        connection.execute(
+            """
+            UPDATE expenses
+            SET owner = CASE
+                WHEN expense_type = 'Personale' AND (owner IS NULL OR TRIM(owner) = '') THEN paid_by
+                ELSE owner
+            END
+            """
         )
 
         categories_count = connection.execute("SELECT COUNT(*) AS total FROM categories").fetchone()["total"]
@@ -151,22 +162,23 @@ def initialize_database() -> None:
                     name,
                     category,
                     description,
-                    payer,
+                    paid_by,
                     expense_type,
+                    owner,
                     split_type,
-                    my_share_percentage
+                    split_ratio
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    ("2026-03-02", 45.50, "Supermercato", "Spesa", "Supermercato settimanale", "Io", "Condivisa", "50/50", 50),
-                    ("2026-03-05", 18.90, "Benzina scooter", "Trasporti", "Benzina scooter", "Io", "Personale", None, None),
-                    ("2026-03-07", 72.00, "Bollette luce", "Casa", "Bollette luce", "Compagna", "Condivisa", "50/50", 50),
-                    ("2026-03-10", 25.00, "Cinema", "Svago", "Cinema", "Compagna", "Condivisa", "Personalizzata", 40),
-                    ("2026-03-12", 32.00, "Farmacia", "Salute", "Farmacia", "Compagna", "Personale", None, None),
-                    ("2026-02-18", 120.00, "Internet mensile", "Casa", "Internet mensile", "Io", "Condivisa", "50/50", 50),
-                    ("2026-02-22", 54.90, "Cena fuori", "Ristoranti", "Cena fuori", "Io", "Condivisa", "Personalizzata", 60),
-                    ("2026-01-28", 89.99, "Corso online", "Abbonamenti", "Corso online", "Io", "Personale", None, None),
+                    ("2026-03-02", 45.50, "Supermercato", "Spesa", "Supermercato settimanale", primary_username, "Condivisa", None, "equal", 0.5),
+                    ("2026-03-05", 18.90, "Benzina scooter", "Trasporti", "Benzina scooter", primary_username, "Personale", primary_username, "equal", 1.0),
+                    ("2026-03-07", 72.00, "Bollette luce", "Casa", "Bollette luce", secondary_username, "Condivisa", None, "equal", 0.5),
+                    ("2026-03-10", 25.00, "Cinema", "Svago", "Cinema", secondary_username, "Condivisa", None, "custom", 0.4),
+                    ("2026-03-12", 32.00, "Farmacia", "Salute", "Farmacia", secondary_username, "Personale", secondary_username, "equal", 1.0),
+                    ("2026-02-18", 120.00, "Internet mensile", "Casa", "Internet mensile", primary_username, "Condivisa", None, "equal", 0.5),
+                    ("2026-02-22", 54.90, "Cena fuori", "Ristoranti", "Cena fuori", primary_username, "Condivisa", None, "custom", 0.6),
+                    ("2026-01-28", 89.99, "Corso online", "Abbonamenti", "Corso online", primary_username, "Personale", primary_username, "equal", 1.0),
                 ],
             )
 
@@ -178,15 +190,16 @@ def initialize_database() -> None:
                     income_date,
                     amount,
                     source,
-                    description
+                    description,
+                    owner
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 [
-                    ("2026-03-01", 2400.00, "Stipendio", "Entrata mensile principale"),
-                    ("2026-03-15", 180.00, "Extra", "Lavoretto freelance"),
-                    ("2026-02-01", 2400.00, "Stipendio", "Entrata mensile principale"),
-                    ("2026-01-01", 2400.00, "Stipendio", "Entrata mensile principale"),
+                    ("2026-03-01", 2400.00, "Stipendio", "Entrata mensile principale", primary_username),
+                    ("2026-03-15", 180.00, "Extra", "Lavoretto freelance", primary_username),
+                    ("2026-02-01", 2400.00, "Stipendio", "Entrata mensile principale", primary_username),
+                    ("2026-01-01", 2400.00, "Stipendio", "Entrata mensile principale", primary_username),
                 ],
             )
 
@@ -203,14 +216,40 @@ def _ensure_user_email_column(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
 
 
-def _migrate_expenses_table_if_needed(connection: sqlite3.Connection) -> None:
-    create_sql_row = connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'expenses'"
-    ).fetchone()
-    create_sql = create_sql_row["sql"] if create_sql_row is not None else ""
-    if "CHECK(payer IN ('Io', 'Compagna'))" not in create_sql:
+def _migrate_expenses_schema_if_needed(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(expenses)").fetchall()
+    existing_names = {column["name"] for column in columns}
+    needs_migration = (
+        "paid_by" not in existing_names
+        or "owner" not in existing_names
+        or "split_type" not in existing_names
+        or "split_ratio" not in existing_names
+        or "payer" in existing_names
+        or "my_share_percentage" in existing_names
+    )
+    if not needs_migration:
+        connection.execute(
+            """
+            UPDATE expenses
+            SET owner = CASE
+                WHEN expense_type = 'Personale' AND (owner IS NULL OR TRIM(owner) = '') THEN paid_by
+                ELSE owner
+            END
+            """
+        )
         return
 
+    source_paid_column = "paid_by" if "paid_by" in existing_names else "payer"
+    source_owner_column = "owner" if "owner" in existing_names else source_paid_column
+    source_name_column = "name" if "name" in existing_names else "description"
+    source_split_type_expr = (
+        "CASE WHEN split_type = 'Personalizzata' THEN 'custom' ELSE 'equal' END"
+        if "split_type" in existing_names
+        else "'equal'"
+    )
+    source_split_ratio_expr = "0.5"
+
+    connection.execute("DROP TABLE IF EXISTS expenses_new")
     connection.execute(
         """
         CREATE TABLE expenses_new (
@@ -220,17 +259,18 @@ def _migrate_expenses_table_if_needed(connection: sqlite3.Connection) -> None:
             name TEXT NOT NULL DEFAULT '',
             category TEXT NOT NULL,
             description TEXT NOT NULL,
-            payer TEXT NOT NULL,
+            paid_by TEXT NOT NULL,
             expense_type TEXT NOT NULL CHECK(expense_type IN ('Personale', 'Condivisa')),
-            split_type TEXT,
-            my_share_percentage REAL,
+            owner TEXT,
+            split_type TEXT NOT NULL DEFAULT 'equal',
+            split_ratio REAL NOT NULL DEFAULT 0.5,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
     connection.execute(
-        """
+        f"""
         INSERT INTO expenses_new (
             id,
             expense_date,
@@ -238,10 +278,11 @@ def _migrate_expenses_table_if_needed(connection: sqlite3.Connection) -> None:
             name,
             category,
             description,
-            payer,
+            paid_by,
             expense_type,
+            owner,
             split_type,
-            my_share_percentage,
+            split_ratio,
             created_at,
             updated_at
         )
@@ -249,17 +290,32 @@ def _migrate_expenses_table_if_needed(connection: sqlite3.Connection) -> None:
             id,
             expense_date,
             amount,
-            description,
+            COALESCE(NULLIF(TRIM({source_name_column}), ''), TRIM(description), 'Spesa'),
             category,
             description,
             CASE
-                WHEN payer = 'Io' THEN 'io'
-                WHEN payer = 'Compagna' THEN 'compagna'
-                ELSE payer
+                WHEN LOWER({source_paid_column}) = 'io' THEN 'io'
+                WHEN LOWER({source_paid_column}) = 'compagna' THEN 'compagna'
+                ELSE {source_paid_column}
             END,
             expense_type,
-            split_type,
-            my_share_percentage,
+            CASE
+                WHEN expense_type = 'Personale' THEN
+                    CASE
+                        WHEN LOWER({source_owner_column}) = 'io' THEN 'io'
+                        WHEN LOWER({source_owner_column}) = 'compagna' THEN 'compagna'
+                        ELSE {source_owner_column}
+                    END
+                ELSE NULL
+            END,
+            CASE
+                WHEN expense_type = 'Personale' THEN 'equal'
+                ELSE {source_split_type_expr}
+            END,
+            CASE
+                WHEN expense_type = 'Personale' THEN 1.0
+                ELSE {source_split_ratio_expr}
+            END,
             created_at,
             updated_at
         FROM expenses
@@ -269,16 +325,19 @@ def _migrate_expenses_table_if_needed(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE expenses_new RENAME TO expenses")
 
 
-def _ensure_expense_name_column(connection: sqlite3.Connection) -> None:
-    columns = connection.execute("PRAGMA table_info(expenses)").fetchall()
+def _ensure_income_owner_column(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(incomes)").fetchall()
     existing_names = {column["name"] for column in columns}
-    if "name" not in existing_names:
-        connection.execute("ALTER TABLE expenses ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+    if "owner" not in existing_names:
+        connection.execute("ALTER TABLE incomes ADD COLUMN owner TEXT DEFAULT ''")
 
+    first_user = connection.execute("SELECT username FROM users ORDER BY id ASC LIMIT 1").fetchone()
+    default_owner = first_user["username"] if first_user is not None else "io"
     connection.execute(
         """
-        UPDATE expenses
-        SET name = COALESCE(NULLIF(TRIM(name), ''), TRIM(description), 'Spesa senza nome')
-        WHERE name IS NULL OR TRIM(name) = ''
-        """
+        UPDATE incomes
+        SET owner = ?
+        WHERE owner IS NULL OR TRIM(owner) = ''
+        """,
+        (default_owner,),
     )

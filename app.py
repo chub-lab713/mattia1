@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import base64
 from datetime import date
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 
 from database import initialize_database
 from services import (
     EXPENSE_TYPE_OPTIONS,
-    SPLIT_TYPE_OPTIONS,
+    SHARED_SPLIT_OPTIONS,
     add_category,
     apply_filters,
     apply_income_filters,
@@ -22,13 +24,16 @@ from services import (
     export_expenses_to_csv,
     export_expenses_to_pdf,
     format_currency,
+    compute_balance,
     get_categories,
     get_expense_by_id,
     get_expenses,
     get_incomes,
+    get_partner_username,
     get_user_by_id,
     get_usernames,
     get_visible_expenses,
+    get_visible_incomes,
     get_month_options,
     update_expense,
     update_user_profile,
@@ -58,6 +63,15 @@ MONTH_NAMES = {
 }
 
 
+def format_month_heading(month_label: str) -> str:
+    if month_label == "Tutti":
+        today = date.today()
+        return f"{MONTH_NAMES[today.strftime('%m')]} {today.strftime('%Y')}"
+
+    year, month = month_label.split("-")
+    return f"{MONTH_NAMES.get(month, month)} {year}"
+
+
 CATEGORY_ICONS = {
     "Spesa": "🛒",
     "Casa": "🏠",
@@ -70,7 +84,6 @@ CATEGORY_ICONS = {
     "Regali": "🎁",
     "Altro": "●",
 }
-
 
 def inject_styles() -> None:
     st.markdown(
@@ -101,15 +114,22 @@ def inject_styles() -> None:
                 max-width: 1320px;
             }
             .hero-card {
-                padding: 1.65rem 1.8rem;
-                border-radius: 28px;
+                padding: 1rem 1.2rem;
+                border-radius: 24px;
                 background:
-                    radial-gradient(circle at top right, rgba(255, 255, 255, 0.16), transparent 28%),
-                    radial-gradient(circle at bottom left, rgba(242, 203, 170, 0.14), transparent 22%),
-                    linear-gradient(135deg, #2d2218 0%, #5d3724 50%, #9b5734 100%);
+                    radial-gradient(circle at 78% 28%, rgba(99, 223, 255, 0.18), transparent 20%),
+                    radial-gradient(circle at 72% 78%, rgba(240, 191, 85, 0.18), transparent 18%),
+                    radial-gradient(circle at bottom left, rgba(242, 203, 170, 0.12), transparent 22%),
+                    linear-gradient(135deg, #241b14 0%, #4a2c1e 48%, #8c542e 100%);
                 color: white;
-                box-shadow: 0 24px 60px rgba(65, 32, 16, 0.16);
-                margin-bottom: 1.5rem;
+                box-shadow: 0 16px 36px rgba(65, 32, 16, 0.12);
+                margin-bottom: 0;
+                transform-origin: top center;
+            }
+            .hero-container {
+                position: relative;
+                opacity: 1;
+                margin: 0 0 0.2rem 0;
             }
             div[data-testid="stMetric"] {
                 background: var(--panel-strong);
@@ -167,13 +187,89 @@ def inject_styles() -> None:
                 font-size: 0.93rem;
                 margin-bottom: 0.9rem;
             }
-            .balance-chip {
-                display: inline-block;
-                margin-top: 0.6rem;
-                padding: 0.45rem 0.7rem;
+            .hero-title {
+                margin: 0;
+                font-size: 1.48rem;
+                line-height: 1.05;
+                text-align: left;
+            }
+            .hero-copy {
+                margin: 0.3rem 0 0 0;
+                max-width: 520px;
+                opacity: 0.88;
+                font-size: 0.88rem;
+                line-height: 1.35;
+                text-align: left;
+            }
+            .hero-meta {
+                max-width: 540px;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .legend-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.42rem;
+                margin-top: 0.58rem;
+            }
+            .legend-badge {
+                display: inline-flex;
+                align-items: center;
+                padding: 0.28rem 0.52rem;
                 border-radius: 999px;
-                background: rgba(255, 255, 255, 0.15);
-                font-size: 0.9rem;
+                background: rgba(255, 255, 255, 0.13);
+                font-size: 0.76rem;
+                line-height: 1;
+            }
+            .hero-layout {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 1.2rem;
+                flex-wrap: wrap;
+            }
+            .hero-visual {
+                flex: 1 1 260px;
+                min-width: 220px;
+                display: flex;
+                justify-content: flex-end;
+                align-items: center;
+            }
+            .hero-visual-frame {
+                position: relative;
+                width: min(100%, 320px);
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+            .hero-visual-frame::before {
+                content: "";
+                position: absolute;
+                inset: 14% 12% 16% 12%;
+                border-radius: 999px;
+                background: radial-gradient(circle, rgba(96, 229, 255, 0.26) 0%, rgba(96, 229, 255, 0.08) 42%, transparent 72%);
+                filter: blur(18px);
+            }
+            .hero-image {
+                position: relative;
+                z-index: 1;
+                width: 100%;
+                max-width: 300px;
+                object-fit: contain;
+                filter: drop-shadow(0 20px 28px rgba(18, 13, 9, 0.22));
+            }
+            @media (max-width: 900px) {
+                .hero-layout {
+                    align-items: flex-start;
+                }
+                .hero-visual {
+                    width: 100%;
+                    justify-content: center;
+                }
+                .hero-meta {
+                    max-width: 100%;
+                }
             }
             div[data-baseweb="select"] > div,
             div[data-baseweb="input"] > div,
@@ -291,6 +387,99 @@ def inject_styles() -> None:
                 font-weight: 600;
                 font-size: 0.95rem;
             }
+            div.st-key-top_new_expense > button,
+            div.st-key-top_new_expense div.stButton > button,
+            div.st-key-top_new_expense button[kind="primary"] {
+                min-height: 46px !important;
+                height: 46px !important;
+                padding: 0.5rem 1.05rem !important;
+                border-radius: 999px !important;
+                background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%) !important;
+                color: white !important;
+                border: 1px solid transparent !important;
+                box-shadow: 0 8px 18px rgba(139, 67, 35, 0.18) !important;
+                font-weight: 600 !important;
+                line-height: 1 !important;
+                white-space: nowrap !important;
+            }
+            div.st-key-top_new_expense > button:hover,
+            div.st-key-top_new_expense div.stButton > button:hover,
+            div.st-key-top_new_expense button[kind="primary"]:hover {
+                transform: none !important;
+                background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%) !important;
+                border-color: transparent !important;
+                box-shadow: 0 8px 18px rgba(139, 67, 35, 0.18) !important;
+            }
+            div.st-key-top_new_expense > button p,
+            div.st-key-top_new_expense div.stButton > button p,
+            div.st-key-top_new_expense button[kind="primary"] p {
+                font-size: 0.95rem !important;
+                font-weight: 600 !important;
+                color: white !important;
+            }
+            div.st-key-dashboard_total_month div.stButton > button,
+            div.st-key-dashboard_my_personal div.stButton > button,
+            div.st-key-dashboard_shared_total div.stButton > button,
+            div.st-key-dashboard_net_month div.stButton > button,
+            div.st-key-dashboard_balance div.stButton > button,
+            div.st-key-dashboard_total_month button[kind="secondary"],
+            div.st-key-dashboard_my_personal button[kind="secondary"],
+            div.st-key-dashboard_shared_total button[kind="secondary"],
+            div.st-key-dashboard_net_month button[kind="secondary"],
+            div.st-key-dashboard_balance button[kind="secondary"] {
+                min-height: 82px !important;
+                height: 82px !important;
+                padding-top: 0.48rem !important;
+                padding-bottom: 0.48rem !important;
+                padding-left: 0.55rem !important;
+                padding-right: 0.55rem !important;
+                border-radius: 18px !important;
+                text-align: center !important;
+                justify-content: center !important;
+                align-items: center !important;
+                white-space: pre-line !important;
+            }
+            div.st-key-dashboard_total_month div.stButton > button p,
+            div.st-key-dashboard_my_personal div.stButton > button p,
+            div.st-key-dashboard_shared_total div.stButton > button p,
+            div.st-key-dashboard_net_month div.stButton > button p,
+            div.st-key-dashboard_balance div.stButton > button p,
+            div.st-key-dashboard_total_month button[kind="secondary"] p,
+            div.st-key-dashboard_my_personal button[kind="secondary"] p,
+            div.st-key-dashboard_shared_total button[kind="secondary"] p,
+            div.st-key-dashboard_net_month button[kind="secondary"] p,
+            div.st-key-dashboard_balance button[kind="secondary"] p {
+                font-size: 0.88rem !important;
+                line-height: 1.02 !important;
+                text-align: center !important;
+            }
+            div.st-key-dashboard_total_month div.stButton > button:hover,
+            div.st-key-dashboard_my_personal div.stButton > button:hover,
+            div.st-key-dashboard_shared_total div.stButton > button:hover,
+            div.st-key-dashboard_net_month div.stButton > button:hover,
+            div.st-key-dashboard_balance div.stButton > button:hover,
+            div.st-key-dashboard_total_month button[kind="secondary"]:hover,
+            div.st-key-dashboard_my_personal button[kind="secondary"]:hover,
+            div.st-key-dashboard_shared_total button[kind="secondary"]:hover,
+            div.st-key-dashboard_net_month button[kind="secondary"]:hover,
+            div.st-key-dashboard_balance button[kind="secondary"]:hover {
+                background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%) !important;
+                border-color: transparent !important;
+                box-shadow: 0 8px 18px rgba(139, 67, 35, 0.18) !important;
+                transform: none !important;
+            }
+            div.st-key-dashboard_total_month div.stButton > button:hover p,
+            div.st-key-dashboard_my_personal div.stButton > button:hover p,
+            div.st-key-dashboard_shared_total div.stButton > button:hover p,
+            div.st-key-dashboard_net_month div.stButton > button:hover p,
+            div.st-key-dashboard_balance div.stButton > button:hover p,
+            div.st-key-dashboard_total_month button[kind="secondary"]:hover p,
+            div.st-key-dashboard_my_personal button[kind="secondary"]:hover p,
+            div.st-key-dashboard_shared_total button[kind="secondary"]:hover p,
+            div.st-key-dashboard_net_month button[kind="secondary"]:hover p,
+            div.st-key-dashboard_balance button[kind="secondary"]:hover p {
+                color: white !important;
+            }
             .legend-row {
                 display: flex;
                 gap: 0.5rem;
@@ -392,6 +581,7 @@ def main() -> None:
     current_username = current_user.get("username", "")
     all_expenses = get_visible_expenses(all_expenses, current_username)
     all_incomes = get_incomes()
+    all_incomes = get_visible_incomes(all_incomes, current_username)
 
     render_topbar()
     filtered_expenses, selected_month = render_sidebar_filters(all_expenses)
@@ -410,10 +600,11 @@ def main() -> None:
         render_operation_detail_page(filtered_expenses, filtered_incomes)
         return
 
+    current_section = render_section_navigation()
     if current_section == "Home":
         render_hero(all_expenses)
         render_dashboard(all_expenses, all_incomes, selected_month)
-    render_main_content(filtered_expenses, filtered_incomes, all_expenses, all_incomes)
+    render_main_content(current_section, filtered_expenses, filtered_incomes, all_expenses, all_incomes)
 
 
 def initialize_session_state() -> None:
@@ -441,7 +632,7 @@ def render_login_page() -> None:
                     Inserisci username e password per entrare nell'app. Le credenziali demo sono pronte per i test.
                 </p>
                 <div class="legend-row">
-                    <span class="legend-badge">Utente demo: io / demo123</span>
+                    <span class="legend-badge">Utente demo: io / password vuota</span>
                     <span class="legend-badge">Utente demo: compagna / demo123</span>
                 </div>
             </div>
@@ -485,30 +676,35 @@ def render_topbar() -> None:
 
 
 def render_hero(dataframe: pd.DataFrame) -> None:
-    total_expenses = len(dataframe)
-    total_amount = format_currency(float(dataframe["amount"].sum())) if not dataframe.empty else format_currency(0)
+    image_path = Path(__file__).with_name("hero-robot-cutout.png")
+    hero_image_html = ""
+    if image_path.exists():
+        encoded_image = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+        hero_image_html = (
+            '<div class="hero-visual">'
+            '<div class="hero-visual-frame">'
+            f'<img src="data:image/png;base64,{encoded_image}" alt="Robot con salvadanaio" class="hero-image">'
+            "</div>"
+            "</div>"
+        )
 
     st.markdown(
         f"""
-        <div class="hero-card">
-            <div style="display:flex; justify-content:space-between; gap:1rem; flex-wrap:wrap; align-items:flex-start;">
-                <div style="max-width:720px;">
-                    <div style="letter-spacing:0.08em; text-transform:uppercase; font-size:0.82rem; opacity:0.78; margin-bottom:0.45rem;">
-                        Finanze personali
+        <div class="hero-container" id="hero-container">
+            <div class="hero-card">
+                <div class="hero-layout">
+                    <div class="hero-meta">
+                        <h1 class="hero-title">Monitor spese personali e di coppia</h1>
+                        <p class="hero-copy">
+                            Uno spazio semplice per registrare le spese, vedere cosa hai speso e capire subito il saldo di coppia.
+                        </p>
+                        <div class="legend-row">
+                            <span class="legend-badge">Chi siamo</span>
+                            <span class="legend-badge">I tuoi risparmi</span>
+                            <span class="legend-badge">I tuoi movimenti</span>
+                        </div>
                     </div>
-                    <h1 style="margin:0; font-size:2.1rem; line-height:1.08;">Monitor spese personali e di coppia</h1>
-                    <p style="margin:0.8rem 0 0 0; max-width:620px; opacity:0.92; font-size:1rem;">
-                        Un cruscotto semplice ma piu curato per registrare le spese, capire chi ha anticipato cosa
-                        e tenere d'occhio il saldo di coppia.
-                    </p>
-                    <div class="legend-row">
-                        <span class="legend-badge">{total_expenses} movimenti registrati</span>
-                        <span class="legend-badge">{total_amount} tracciati</span>
-                        <span class="legend-badge">SQLite locale</span>
-                    </div>
-                </div>
-                <div class="balance-chip">
-                    Inserisci, filtra, modifica ed esporta in pochi clic
+                    {hero_image_html}
                 </div>
             </div>
         </div>
@@ -518,19 +714,12 @@ def render_hero(dataframe: pd.DataFrame) -> None:
 
 
 def render_main_content(
+    section: str,
     filtered_expenses: pd.DataFrame,
     filtered_incomes: pd.DataFrame,
     all_expenses: pd.DataFrame,
     all_incomes: pd.DataFrame,
 ) -> None:
-    section = st.radio(
-        "Sezioni",
-        ["Home", "Entrate", "Uscite", "Analisi", "Riepilogo"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="current_section",
-    )
-
     if section == "Home":
         st.caption("Scegli una card per entrare nella schermata dedicata all'operazione che vuoi eseguire.")
         render_operation_cards(filtered_expenses)
@@ -542,22 +731,40 @@ def render_main_content(
 
     elif section == "Uscite":
         render_secondary_stats_line(all_expenses, all_incomes, "Uscite")
-        st.caption("Trova una categoria e apri il dettaglio delle spese che contiene.")
+        st.caption("Trova una categoria e apri il dettaglio delle spese visibili nel tuo archivio.")
         render_category_dashboard(filtered_expenses)
 
-    elif section == "Analisi":
-        render_secondary_stats_line(all_expenses, all_incomes, "Analisi")
-        st.caption("Una vista piu calma per capire come stai spendendo nel tempo.")
-        render_charts(filtered_expenses)
-        st.write("")
-        render_income_expense_analysis(all_incomes, all_expenses)
-
-    else:
+    elif section == "Riepilogo":
         render_secondary_stats_line(all_expenses, all_incomes, "Riepilogo")
-        st.caption("Tutte le spese filtrate in un'unica vista, con esportazione CSV.")
+        st.caption("Tutte le spese visibili con i filtri attivi, con esportazione CSV.")
         render_expense_list(filtered_expenses)
         st.write("")
         render_export_section(filtered_expenses)
+
+    elif section == "Calendario":
+        st.caption("Una vista calendario per leggere il mese in modo piu visivo.")
+        st.info("Calendario in arrivo. Qui vedrai presto spese ed entrate distribuite giorno per giorno.")
+
+    else:
+        st.caption("Promemoria e spese programmate, con una notifica per cio che richiede attenzione.")
+        st.info("Programma spese in arrivo. Qui vedrai promemoria, ricorrenze e spese da tenere d'occhio.")
+
+
+def render_section_navigation() -> str:
+    nav_col, action_col = st.columns([1, 0.22], vertical_alignment="center")
+    with nav_col:
+        section = st.radio(
+            "Sezioni",
+            ["Home", "Entrate", "Uscite", "Riepilogo", "Calendario", "Programma spese •"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="current_section",
+        )
+    with action_col:
+        if st.button("Nuova spesa", key="top_new_expense", use_container_width=True, type="primary"):
+            st.session_state.current_view = "new_expense"
+            st.rerun()
+    return "Programma spese" if section == "Programma spese •" else section
 
 
 def render_secondary_stats_line(all_expenses: pd.DataFrame, all_incomes: pd.DataFrame, section_name: str) -> None:
@@ -616,7 +823,7 @@ def render_sidebar_filters(dataframe: pd.DataFrame) -> tuple[pd.DataFrame, str]:
 
     month_options = get_month_options(dataframe)
     category_options = ["Tutte"] + get_categories()
-    payer_values = sorted(dataframe["payer"].dropna().unique().tolist()) if not dataframe.empty else []
+    payer_values = sorted(dataframe["paid_by"].dropna().unique().tolist()) if not dataframe.empty else []
     payer_options = ["Tutti"] + payer_values
     type_options = ["Tutte"] + EXPENSE_TYPE_OPTIONS
 
@@ -697,36 +904,37 @@ def render_dashboard(all_expenses: pd.DataFrame, all_incomes: pd.DataFrame, sele
     month_incomes = all_incomes if selected_month == "Tutti" else all_incomes[all_incomes["month_label"] == selected_month]
     metrics = build_dashboard_metrics(month_data, current_username)
     total_incomes = float(month_incomes["amount"].sum()) if not month_incomes.empty else 0.0
+    net_month = total_incomes - float(metrics["total_month"])
 
-    st.subheader("Dashboard")
+    st.subheader(format_month_heading(selected_month))
     col1, col2, col3, col4, col5 = st.columns(5)
     render_dashboard_card(
         col1,
-        "Totale entrate",
-        format_currency(total_incomes),
-        "total_incomes",
-    )
-    render_dashboard_card(
-        col2,
-        "Totale spese mese",
+        "USCITE",
         format_currency(metrics["total_month"]),
         "total_month",
     )
     render_dashboard_card(
-        col3,
-        "Mie spese personali",
+        col2,
+        "PERSONALI",
         format_currency(metrics["my_personal"]),
         "my_personal",
     )
     render_dashboard_card(
-        col4,
-        "Spese condivise",
+        col3,
+        "CONDIVISE",
         format_currency(metrics["shared_total"]),
         "shared_total",
     )
     render_dashboard_card(
+        col4,
+        "SALDO",
+        format_currency(net_month),
+        "net_month",
+    )
+    render_dashboard_card(
         col5,
-        "Saldo coppia",
+        "SALDO COPPIA",
         build_balance_label(metrics["balance"]),
         "balance",
     )
@@ -752,22 +960,27 @@ def render_dashboard_card(column, title: str, value: str, metric_key: str) -> No
 
 def render_create_form() -> None:
     category_options = get_categories()
-    payer_usernames = get_usernames()
+    paid_by_usernames = get_usernames()
+    current_username = (st.session_state.current_user or {}).get("username", "")
+    partner_username = get_partner_username(current_username)
+    today = date.today()
     if st.session_state.pop("reset_new_expense_form", False):
         for key in [
-            "new_expense_name",
             "new_expense_amount",
+            "new_expense_name",
             "new_expense_date",
             "new_expense_description",
             "new_expense_category",
-            "new_expense_payer",
+            "new_expense_paid_by",
             "new_expense_type",
             "new_expense_split_type",
-            "new_expense_share_percentage",
+            "new_expense_split_ratio",
         ]:
             st.session_state.pop(key, None)
+    if "new_expense_date" not in st.session_state:
+        st.session_state.new_expense_date = today
 
-    col1, col2, col3 = st.columns([1.35, 0.85, 0.8])
+    col1, col2 = st.columns([1.6, 0.9])
     name = col1.text_input("Nome", placeholder="Spesa, bolletta, cena...", key="new_expense_name")
     amount = col2.number_input(
         "Importo",
@@ -776,43 +989,89 @@ def render_create_form() -> None:
         format="%.2f",
         key="new_expense_amount",
     )
-    expense_date = col3.date_input(
-        "Data",
-        value=st.session_state.get("new_expense_date", date.today()),
-        format="YYYY-MM-DD",
-        key="new_expense_date",
-    )
 
-    category = st.selectbox("Categoria", category_options, key="new_expense_category")
-    description = st.text_area(
-        "Descrizione",
-        placeholder="Facoltativa",
-        help="Puoi lasciarla vuota se non ti serve.",
-        key="new_expense_description",
-    )
+    col3, col4 = st.columns(2)
+    category = col3.selectbox("Categoria", category_options, key="new_expense_category")
+    expense_type = col4.selectbox("Tipo spesa", EXPENSE_TYPE_OPTIONS, key="new_expense_type")
 
-    col4, col5 = st.columns(2)
-    payer = col4.selectbox("Persona che ha pagato", payer_usernames, key="new_expense_payer")
-    expense_type = col5.selectbox("Tipo spesa", EXPENSE_TYPE_OPTIONS, key="new_expense_type")
+    if expense_type == "Personale":
+        paid_by = current_username
+        st.text_input("Persona che ha pagato", value=current_username, disabled=True)
+    else:
+        paid_by = st.selectbox("Persona che ha pagato", paid_by_usernames, key="new_expense_paid_by")
 
-    split_type = None
-    my_share_percentage = None
-
-    if expense_type == "Condivisa":
-        split_type = st.selectbox("Divisione", SPLIT_TYPE_OPTIONS, key="new_expense_split_type")
-        if split_type == "50/50":
-            my_share_percentage = 50.0
-        else:
-            my_share_percentage = st.slider(
-                "Percentuale della mia quota",
+    split_type = "equal"
+    split_ratio = 1.0 if expense_type == "Personale" else 0.5
+    if expense_type == "Personale":
+        st.caption("Le spese personali sono visibili solo al proprietario e non influenzano il saldo.")
+    else:
+        split_type = st.segmented_control(
+            "Divisione",
+            SHARED_SPLIT_OPTIONS,
+            format_func=lambda value: "50/50" if value == "equal" else "Personalizzata",
+            default="equal",
+            key="new_expense_split_type",
+        )
+        if split_type == "custom":
+            split_ratio = st.slider(
+                "Quota di chi paga vs quota partner",
                 min_value=0,
                 max_value=100,
-                value=int(st.session_state.get("new_expense_share_percentage", 50)),
-                key="new_expense_share_percentage",
-                help="La quota dell'altra persona viene calcolata automaticamente come complemento a 100.",
-            )
+                value=int(st.session_state.get("new_expense_split_ratio", 50)),
+                key="new_expense_split_ratio",
+                help="La percentuale rappresenta la quota di chi paga.",
+            ) / 100
+        payer_share = amount * split_ratio
+        partner_share = amount - payer_share
+        if paid_by == current_username:
+            your_share = payer_share
+            other_share = partner_share
+        else:
+            your_share = partner_share
+            other_share = payer_share
+        st.caption(
+            f"Tu: {format_currency(your_share)} / Partner: {format_currency(other_share)}"
+        )
+
+    with st.expander("Dettagli opzionali", expanded=False):
+        expense_date = st.date_input(
+            "Data",
+            value=st.session_state.new_expense_date,
+            format="YYYY-MM-DD",
+            key="new_expense_date",
+        )
+        description = st.text_area(
+            "Note",
+            placeholder="Facoltative",
+            help="Aggiungi dettagli extra solo se ti servono.",
+            key="new_expense_description",
+        )
+
+    current_balance = 0.0
+    if current_username:
+        current_expenses = get_visible_expenses(get_expenses(), current_username)
+        current_balance = compute_balance(current_username, partner_username, current_expenses)
+
+    balance_delta = 0.0
+    if expense_type == "Condivisa":
+        payer_share = amount * split_ratio
+        partner_share = amount - payer_share
+        if paid_by == current_username:
+            balance_delta = partner_share
+        else:
+            balance_delta = -(amount - payer_share)
+
+    new_balance = current_balance + balance_delta
+    st.caption("Anteprima saldo")
+    if expense_type == "Condivisa":
+        st.write(
+            f"Impatto: {build_balance_label(balance_delta)}"
+        )
+        st.write(
+            f"Saldo stimato dopo questa spesa: {build_balance_label(new_balance)}"
+        )
     else:
-        st.caption("Per le spese personali non serve impostare una divisione.")
+        st.write("Impatto: nessun effetto sul saldo di coppia")
 
     if st.button("Salva spesa", use_container_width=True, key="save_new_expense"):
         payload = {
@@ -820,7 +1079,8 @@ def render_create_form() -> None:
             "name": name,
             "description": description,
             "expense_type": expense_type,
-            "my_share_percentage": my_share_percentage,
+            "split_type": split_type,
+            "split_ratio": split_ratio,
         }
         errors = validate_expense_data(payload)
         if errors:
@@ -833,10 +1093,10 @@ def render_create_form() -> None:
                 name=name,
                 category=category,
                 description=description,
-                payer=payer,
+                paid_by=paid_by,
                 expense_type=expense_type,
                 split_type=split_type,
-                my_share_percentage=my_share_percentage,
+                split_ratio=split_ratio,
             )
             st.success("Spesa salvata con successo.")
             st.session_state.reset_new_expense_form = True
@@ -856,18 +1116,19 @@ def render_expense_list(dataframe: pd.DataFrame) -> None:
             "name",
             "category",
             "description",
-            "payer",
+            "paid_by",
+            "owner",
             "expense_type",
             "split_type",
-            "my_share_amount",
-            "partner_share_amount",
+            "split_ratio",
         ]
     ].copy()
     display_frame["expense_date"] = display_frame["expense_date"].dt.strftime("%Y-%m-%d")
     display_frame["amount"] = display_frame["amount"].map(format_currency)
-    display_frame["my_share_amount"] = display_frame["my_share_amount"].map(format_currency)
-    display_frame["partner_share_amount"] = display_frame["partner_share_amount"].map(format_currency)
-    display_frame["split_type"] = display_frame["split_type"].fillna("-")
+    display_frame["owner"] = display_frame["owner"].fillna("-")
+    display_frame["split_ratio"] = display_frame["split_ratio"].apply(
+        lambda value: f"{int(float(value) * 100)}%" if pd.notna(value) else "-"
+    )
     display_frame = display_frame.rename(
         columns={
             "id": "ID",
@@ -876,11 +1137,11 @@ def render_expense_list(dataframe: pd.DataFrame) -> None:
             "name": "Nome",
             "category": "Categoria",
             "description": "Descrizione",
-            "payer": "Pagato da",
+            "paid_by": "Pagato da",
+            "owner": "Proprietario",
             "expense_type": "Tipo spesa",
             "split_type": "Divisione",
-            "my_share_amount": "Quota mia",
-            "partner_share_amount": "Quota compagna",
+            "split_ratio": "Quota pagatore",
         }
     )
 
@@ -896,10 +1157,10 @@ def render_expense_list(dataframe: pd.DataFrame) -> None:
             "Categoria": st.column_config.TextColumn(width="small"),
             "Descrizione": st.column_config.TextColumn(width="medium"),
             "Pagato da": st.column_config.TextColumn(width="small"),
+            "Proprietario": st.column_config.TextColumn(width="small"),
             "Tipo spesa": st.column_config.TextColumn(width="small"),
             "Divisione": st.column_config.TextColumn(width="small"),
-            "Quota mia": st.column_config.TextColumn(width="small"),
-            "Quota compagna": st.column_config.TextColumn(width="small"),
+            "Quota pagatore": st.column_config.TextColumn(width="small"),
         },
     )
 
@@ -910,7 +1171,8 @@ def render_edit_section(dataframe: pd.DataFrame) -> None:
         return
 
     category_options = get_categories()
-    payer_usernames = get_usernames()
+    paid_by_usernames = get_usernames()
+    current_username = (st.session_state.current_user or {}).get("username", "")
 
     options = {
         build_expense_option_label(row): int(row["id"])
@@ -950,39 +1212,43 @@ def render_edit_section(dataframe: pd.DataFrame) -> None:
         description = st.text_area("Descrizione modifica", value=expense["description"])
 
         col5, col6 = st.columns(2)
-        payer = col5.selectbox(
-            "Persona che ha pagato",
-            payer_usernames,
-            index=payer_usernames.index(expense["payer"]) if expense["payer"] in payer_usernames else 0,
-        )
         expense_type = col6.selectbox(
             "Tipo spesa modifica",
             EXPENSE_TYPE_OPTIONS,
             index=EXPENSE_TYPE_OPTIONS.index(expense["expense_type"]),
         )
-
-        split_type = None
-        my_share_percentage = None
-
-        if expense_type == "Condivisa":
-            default_split = expense["split_type"] or "50/50"
-            split_type = st.selectbox(
-                "Divisione modifica",
-                SPLIT_TYPE_OPTIONS,
-                index=SPLIT_TYPE_OPTIONS.index(default_split),
+        if expense_type == "Personale":
+            paid_by = current_username
+            col5.text_input("Persona che ha pagato", value=current_username, disabled=True)
+            split_type = "equal"
+            split_ratio = 1.0
+        else:
+            paid_by = col5.selectbox(
+                "Persona che ha pagato",
+                paid_by_usernames,
+                index=paid_by_usernames.index(expense["paid_by"]) if expense["paid_by"] in paid_by_usernames else 0,
             )
-            if split_type == "50/50":
-                my_share_percentage = 50.0
-            else:
-                default_share = int(expense["my_share_percentage"] or 50)
-                my_share_percentage = st.slider(
-                    "Percentuale della mia quota modifica",
+            default_split_type = expense.get("split_type", "equal") or "equal"
+            split_type = st.segmented_control(
+                "Divisione modifica",
+                SHARED_SPLIT_OPTIONS,
+                format_func=lambda value: "50/50" if value == "equal" else "Personalizzata",
+                default=default_split_type,
+                key=f"edit_expense_split_type_{selected_expense_id}",
+            )
+            split_ratio = 0.5 if split_type == "equal" else float(expense.get("split_ratio") or 0.5)
+            if split_type == "custom":
+                split_ratio = st.slider(
+                    "Quota di chi paga vs quota partner",
                     min_value=0,
                     max_value=100,
-                    value=default_share,
-                )
-        else:
-            st.caption("Per le spese personali non serve impostare una divisione.")
+                    value=int(split_ratio * 100),
+                    key=f"edit_expense_split_ratio_{selected_expense_id}",
+                    help="La percentuale rappresenta la quota di chi paga.",
+                ) / 100
+            st.caption("Per default le spese condivise sono 50/50.")
+        if expense_type == "Personale":
+            st.caption("Le spese personali restano private e fuori dal saldo.")
 
         save_col, delete_col = st.columns(2)
         save_clicked = save_col.form_submit_button("Aggiorna spesa", use_container_width=True)
@@ -994,7 +1260,8 @@ def render_edit_section(dataframe: pd.DataFrame) -> None:
                 "name": name,
                 "description": description,
                 "expense_type": expense_type,
-                "my_share_percentage": my_share_percentage,
+                "split_type": split_type,
+                "split_ratio": split_ratio,
             }
             errors = validate_expense_data(payload)
             if errors:
@@ -1008,10 +1275,10 @@ def render_edit_section(dataframe: pd.DataFrame) -> None:
                     name=name,
                     category=category,
                     description=description,
-                    payer=payer,
+                    paid_by=paid_by,
                     expense_type=expense_type,
                     split_type=split_type,
-                    my_share_percentage=my_share_percentage,
+                    split_ratio=split_ratio,
                 )
                 st.success("Spesa aggiornata con successo.")
                 st.rerun()
@@ -1146,7 +1413,7 @@ def render_recent_expenses_expander(dataframe: pd.DataFrame) -> None:
                 f"{row['category']}  |  "
                 f"{format_currency(float(row['amount']))}"
             )
-            extra = f"{row['payer']}  |  {row['expense_type']}"
+            extra = f"{row['paid_by']}  |  {row['expense_type']}"
 
             content_col, action_col = st.columns([0.92, 0.08], vertical_alignment="center")
             with content_col:
@@ -1184,6 +1451,11 @@ def render_operation_cards(dataframe: pd.DataFrame) -> None:
             "title": "Aggiungi categoria",
             "subtitle": "Crea una nuova categoria da usare nei prossimi inserimenti.",
             "view": "add_category",
+        },
+        {
+            "title": "Analisi",
+            "subtitle": "Guarda grafici e andamento mensile in una schermata dedicata.",
+            "view": "analysis",
         },
     ]
 
@@ -1232,6 +1504,10 @@ def render_operation_detail_page(filtered_expenses: pd.DataFrame, filtered_incom
             "Aggiungi categoria",
             "Crea una nuova categoria personalizzata per organizzare meglio le spese.",
         ),
+        "analysis": (
+            "Analisi",
+            "Una vista piu calma per capire come stai spendendo nel tempo.",
+        ),
     }
 
     if current_view not in view_config:
@@ -1243,9 +1519,6 @@ def render_operation_detail_page(filtered_expenses: pd.DataFrame, filtered_incom
     st.markdown(
         f"""
         <div class="hero-card">
-            <div style="letter-spacing:0.08em; text-transform:uppercase; font-size:0.82rem; opacity:0.78; margin-bottom:0.45rem;">
-                Operazioni
-            </div>
             <h1 style="margin:0; font-size:2rem;">{title}</h1>
             <p style="margin:0.8rem 0 0 0; max-width:780px; opacity:0.92; font-size:1rem;">
                 {subtitle}
@@ -1277,6 +1550,13 @@ def render_operation_detail_page(filtered_expenses: pd.DataFrame, filtered_incom
     elif current_view == "add_category":
         open_section("Aggiungi categoria", "Una nuova categoria sara disponibile nei form delle spese.")
         render_add_category_form()
+        close_section()
+    elif current_view == "analysis":
+        render_secondary_stats_line(filtered_expenses, filtered_incomes, "Analisi")
+        open_section("Analisi", "Grafici e confronto tra entrate e uscite del periodo filtrato.")
+        render_charts(filtered_expenses)
+        st.write("")
+        render_income_expense_analysis(filtered_incomes, filtered_expenses)
         close_section()
 
 
@@ -1333,6 +1613,7 @@ def render_create_income_form() -> None:
                     amount=amount,
                     source=source,
                     description=description,
+                    owner=st.session_state.current_user["username"],
                 )
                 st.success("Entrata salvata con successo.")
                 st.rerun()
@@ -1387,28 +1668,34 @@ def render_dashboard_detail_page(all_expenses: pd.DataFrame, all_incomes: pd.Dat
 
     view_map = {
         "total_incomes": (
-            "Totale entrate",
+            "Entrate",
             "Tutte le entrate del periodo selezionato.",
             month_incomes,
             "income",
         ),
         "total_month": (
-            "Totale spese mese",
+            "Uscite",
             "Tutte le spese del periodo selezionato.",
             month_data,
             "expense",
         ),
         "my_personal": (
-            "Mie spese personali",
+            "Personali",
             "Solo le spese personali pagate da me.",
-            month_data[(month_data["expense_type"] == "Personale") & (month_data["payer"] == current_username)],
+            month_data[(month_data["expense_type"] == "Personale") & (month_data["owner"] == current_username)],
             "expense",
         ),
         "shared_total": (
-            "Spese condivise",
+            "Condivise",
             "Tutte le spese condivise del periodo selezionato.",
             month_data[month_data["expense_type"] == "Condivisa"],
             "expense",
+        ),
+        "net_month": (
+            "Saldo",
+            "Differenza tra entrate e uscite del periodo selezionato.",
+            pd.DataFrame(),
+            "net",
         ),
         "balance": (
             "Saldo coppia",
@@ -1448,7 +1735,14 @@ def render_dashboard_detail_page(all_expenses: pd.DataFrame, all_incomes: pd.Dat
 
     open_section(title, "Elenco delle spese che compongono la voce selezionata.")
     if detail_frame.empty:
-        st.info("Nessuna spesa trovata per questa voce della dashboard.")
+        if detail_type == "net":
+            total_incomes = float(month_incomes["amount"].sum()) if not month_incomes.empty else 0.0
+            total_expenses = float(month_data["amount"].sum()) if not month_data.empty else 0.0
+            st.write(f"Entrate: {format_currency(total_incomes)}")
+            st.write(f"Uscite: {format_currency(total_expenses)}")
+            st.write(f"Saldo del periodo: {format_currency(total_incomes - total_expenses)}")
+        else:
+            st.info("Nessuna spesa trovata per questa voce della dashboard.")
     else:
         if detail_type == "income":
             render_incomes_section(detail_frame)
@@ -1555,30 +1849,33 @@ def render_category_detail_page(filtered_expenses: pd.DataFrame) -> None:
     summary = build_category_summary(category_expenses)
     category_row = summary.iloc[0]
 
-    stat1, stat2, stat3, stat4 = st.columns(4)
+    stat1, stat2, stat3 = st.columns(3)
     stat1.metric("Totale categoria", format_currency(float(category_row["totale"])))
     stat2.metric("Numero spese", int(category_row["numero_spese"]))
-    stat3.metric("Quota mia", format_currency(float(category_row["quota_mia"])))
-    stat4.metric("Quota compagna", format_currency(float(category_row["quota_compagna"])))
+    stat3.metric(
+        "Spese condivise",
+        int((category_expenses["expense_type"] == "Condivisa").sum()),
+    )
 
     open_section("Spese della categoria", "Elenco dettagliato dei movimenti appartenenti a questa categoria.")
     for _, row in category_expenses.iterrows():
-        split_label = row["split_type"] if pd.notna(row["split_type"]) else "-"
         expense_name = str(row.get("name") or row.get("description") or "Spesa")
         description = str(row.get("description") or "").strip()
+        split_type = str(row.get("split_type") or "equal")
+        split_ratio = float(row.get("split_ratio") or 0.5)
+        split_label = "50/50" if split_type == "equal" else f"Personalizzata {int(split_ratio * 100)}% / {int((1 - split_ratio) * 100)}%"
         with st.container(border=True):
             st.markdown(f"**{expense_name}**")
             meta_line = (
                 f"Data: {row['expense_date'].strftime('%Y-%m-%d')}  |  "
                 f"Importo: {format_currency(float(row['amount']))}  |  "
-                f"Pagato da: {row['payer']}"
+                f"Pagato da: {row['paid_by']}"
             )
             st.caption(meta_line)
             details_line = (
                 f"Tipo: {row['expense_type']}  |  "
-                f"Divisione: {split_label}  |  "
-                f"Quota mia: {format_currency(float(row['my_share_amount']))}  |  "
-                f"Quota compagna: {format_currency(float(row['partner_share_amount']))}"
+                f"Proprietario: {row.get('owner') or '-'}  |  "
+                f"Divisione: {split_label}"
             )
             st.caption(details_line)
             if description:
