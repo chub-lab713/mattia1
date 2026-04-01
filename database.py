@@ -1,0 +1,284 @@
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "spese.db"
+
+
+def get_connection() -> sqlite3.Connection:
+    """Restituisce una connessione SQLite con accesso ai campi per nome."""
+    DATA_DIR.mkdir(exist_ok=True)
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database() -> None:
+    """Crea le tabelle principali e inserisce dati demo al primo avvio."""
+    with get_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        _ensure_user_email_column(connection)
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                expense_date TEXT NOT NULL,
+                amount REAL NOT NULL CHECK(amount > 0),
+                name TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                payer TEXT NOT NULL,
+                expense_type TEXT NOT NULL CHECK(expense_type IN ('Personale', 'Condivisa')),
+                split_type TEXT,
+                my_share_percentage REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        _migrate_expenses_table_if_needed(connection)
+        _ensure_expense_name_column(connection)
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS incomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                income_date TEXT NOT NULL,
+                amount REAL NOT NULL CHECK(amount > 0),
+                source TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        users_count = connection.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
+        if users_count == 0:
+            connection.executemany(
+                """
+                INSERT INTO users (full_name, username, email, password_hash)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    ("Mattia", "io", "", _hash_password("")),
+                    ("Compagna", "compagna", "", _hash_password("demo123")),
+                ],
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE users
+                SET full_name = ?, password_hash = ?
+                WHERE username = ?
+                """,
+                ("Mattia", _hash_password(""), "io"),
+            )
+
+        usernames = [
+            row["username"]
+            for row in connection.execute("SELECT username FROM users ORDER BY id ASC").fetchall()
+        ]
+        primary_username = usernames[0] if usernames else "io"
+        secondary_username = usernames[1] if len(usernames) > 1 else "compagna"
+        connection.execute(
+            """
+            UPDATE expenses
+            SET payer = CASE
+                WHEN LOWER(payer) = 'io' THEN ?
+                WHEN LOWER(payer) = 'compagna' THEN ?
+                ELSE payer
+            END
+            WHERE LOWER(payer) IN ('io', 'compagna')
+            """,
+            (primary_username, secondary_username),
+        )
+
+        categories_count = connection.execute("SELECT COUNT(*) AS total FROM categories").fetchone()["total"]
+        if categories_count == 0:
+            connection.executemany(
+                """
+                INSERT INTO categories (name)
+                VALUES (?)
+                """,
+                [
+                    ("Spesa",),
+                    ("Casa",),
+                    ("Trasporti",),
+                    ("Ristoranti",),
+                    ("Svago",),
+                    ("Salute",),
+                    ("Abbonamenti",),
+                    ("Viaggi",),
+                    ("Regali",),
+                    ("Altro",),
+                ],
+            )
+
+        count = connection.execute("SELECT COUNT(*) AS total FROM expenses").fetchone()["total"]
+        if count == 0:
+            connection.executemany(
+                """
+                INSERT INTO expenses (
+                    expense_date,
+                    amount,
+                    name,
+                    category,
+                    description,
+                    payer,
+                    expense_type,
+                    split_type,
+                    my_share_percentage
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("2026-03-02", 45.50, "Supermercato", "Spesa", "Supermercato settimanale", "Io", "Condivisa", "50/50", 50),
+                    ("2026-03-05", 18.90, "Benzina scooter", "Trasporti", "Benzina scooter", "Io", "Personale", None, None),
+                    ("2026-03-07", 72.00, "Bollette luce", "Casa", "Bollette luce", "Compagna", "Condivisa", "50/50", 50),
+                    ("2026-03-10", 25.00, "Cinema", "Svago", "Cinema", "Compagna", "Condivisa", "Personalizzata", 40),
+                    ("2026-03-12", 32.00, "Farmacia", "Salute", "Farmacia", "Compagna", "Personale", None, None),
+                    ("2026-02-18", 120.00, "Internet mensile", "Casa", "Internet mensile", "Io", "Condivisa", "50/50", 50),
+                    ("2026-02-22", 54.90, "Cena fuori", "Ristoranti", "Cena fuori", "Io", "Condivisa", "Personalizzata", 60),
+                    ("2026-01-28", 89.99, "Corso online", "Abbonamenti", "Corso online", "Io", "Personale", None, None),
+                ],
+            )
+
+        incomes_count = connection.execute("SELECT COUNT(*) AS total FROM incomes").fetchone()["total"]
+        if incomes_count == 0:
+            connection.executemany(
+                """
+                INSERT INTO incomes (
+                    income_date,
+                    amount,
+                    source,
+                    description
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    ("2026-03-01", 2400.00, "Stipendio", "Entrata mensile principale"),
+                    ("2026-03-15", 180.00, "Extra", "Lavoretto freelance"),
+                    ("2026-02-01", 2400.00, "Stipendio", "Entrata mensile principale"),
+                    ("2026-01-01", 2400.00, "Stipendio", "Entrata mensile principale"),
+                ],
+            )
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _ensure_user_email_column(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(users)").fetchall()
+    existing_names = {column["name"] for column in columns}
+    if "email" in existing_names:
+        return
+    connection.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
+
+
+def _migrate_expenses_table_if_needed(connection: sqlite3.Connection) -> None:
+    create_sql_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'expenses'"
+    ).fetchone()
+    create_sql = create_sql_row["sql"] if create_sql_row is not None else ""
+    if "CHECK(payer IN ('Io', 'Compagna'))" not in create_sql:
+        return
+
+    connection.execute(
+        """
+        CREATE TABLE expenses_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expense_date TEXT NOT NULL,
+            amount REAL NOT NULL CHECK(amount > 0),
+            name TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL,
+            description TEXT NOT NULL,
+            payer TEXT NOT NULL,
+            expense_type TEXT NOT NULL CHECK(expense_type IN ('Personale', 'Condivisa')),
+            split_type TEXT,
+            my_share_percentage REAL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO expenses_new (
+            id,
+            expense_date,
+            amount,
+            name,
+            category,
+            description,
+            payer,
+            expense_type,
+            split_type,
+            my_share_percentage,
+            created_at,
+            updated_at
+        )
+        SELECT
+            id,
+            expense_date,
+            amount,
+            description,
+            category,
+            description,
+            CASE
+                WHEN payer = 'Io' THEN 'io'
+                WHEN payer = 'Compagna' THEN 'compagna'
+                ELSE payer
+            END,
+            expense_type,
+            split_type,
+            my_share_percentage,
+            created_at,
+            updated_at
+        FROM expenses
+        """
+    )
+    connection.execute("DROP TABLE expenses")
+    connection.execute("ALTER TABLE expenses_new RENAME TO expenses")
+
+
+def _ensure_expense_name_column(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(expenses)").fetchall()
+    existing_names = {column["name"] for column in columns}
+    if "name" not in existing_names:
+        connection.execute("ALTER TABLE expenses ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+
+    connection.execute(
+        """
+        UPDATE expenses
+        SET name = COALESCE(NULLIF(TRIM(name), ''), TRIM(description), 'Spesa senza nome')
+        WHERE name IS NULL OR TRIM(name) = ''
+        """
+    )
