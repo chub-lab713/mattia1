@@ -143,3 +143,4 @@ La UI Streamlit resta disponibile come interfaccia legacy.
 - Se la porta `5173` è occupata, Vite userà un'altra porta: usa quella mostrata nel terminale
 - FastAPI/React e Streamlit possono coesistere temporaneamente durante la migrazione
 # rob.couple
+# rob.couple
