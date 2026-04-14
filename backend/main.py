@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from datetime import date
 from typing import Annotated
 
 import pandas as pd
@@ -9,7 +10,11 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.schemas import (
+    BulkDeletePayload,
     CategoryPayload,
+    CalendarDayDetailResponse,
+    CalendarResponse,
+    CoupleBalanceResponse,
     ExpensePayload,
     IncomePayload,
     LoginRequest,
@@ -18,7 +23,6 @@ from backend.schemas import (
 )
 from backend.serializers import (
     serialize_category_summary,
-    serialize_couple_balance,
     serialize_expense,
     serialize_expense_frame,
     serialize_income,
@@ -36,8 +40,12 @@ from services import (
     apply_income_filters,
     authenticate_user,
     build_category_summary,
+    build_calendar_data,
+    build_calendar_day_detail,
+    build_couple_balance_data,
     build_dashboard_metrics,
     build_income_vs_expense_summary,
+    compute_balance,
     create_expense,
     create_income,
     delete_category,
@@ -50,6 +58,7 @@ from services import (
     get_income_by_id,
     get_incomes,
     get_month_options,
+    get_partner_username,
     get_shared_expenses,
     get_user_by_id,
     get_usernames,
@@ -137,6 +146,26 @@ def _filter_expenses(
     return filtered.copy()
 
 
+def _sort_expenses(dataframe: pd.DataFrame, sort: str = "date_desc") -> pd.DataFrame:
+    if dataframe.empty:
+        return dataframe.copy()
+    if sort == "amount_desc":
+        return dataframe.sort_values(by=["amount", "expense_date", "id"], ascending=[False, False, False]).copy()
+    if sort == "amount_asc":
+        return dataframe.sort_values(by=["amount", "expense_date", "id"], ascending=[True, False, False]).copy()
+    return dataframe.sort_values(by=["expense_date", "id"], ascending=[False, False]).copy()
+
+
+def _sort_incomes(dataframe: pd.DataFrame, sort: str = "date_desc") -> pd.DataFrame:
+    if dataframe.empty:
+        return dataframe.copy()
+    if sort == "amount_desc":
+        return dataframe.sort_values(by=["amount", "income_date", "id"], ascending=[False, False, False]).copy()
+    if sort == "amount_asc":
+        return dataframe.sort_values(by=["amount", "income_date", "id"], ascending=[True, False, False]).copy()
+    return dataframe.sort_values(by=["income_date", "id"], ascending=[False, False]).copy()
+
+
 def _filter_incomes(
     current_username: str,
     month_label: str = "Tutti",
@@ -153,6 +182,40 @@ def _filter_incomes(
         )
         filtered = filtered[mask]
     return filtered.copy()
+
+
+def _build_expense_list_summary(dataframe: pd.DataFrame, current_username: str) -> dict:
+    total_amount = float(dataframe["amount"].sum()) if not dataframe.empty else 0.0
+    personal_total = (
+        float(dataframe[dataframe["expense_type"] == "Personale"]["amount"].sum())
+        if not dataframe.empty
+        else 0.0
+    )
+    shared_total = (
+        float(dataframe[dataframe["expense_type"] == "Condivisa"]["amount"].sum())
+        if not dataframe.empty
+        else 0.0
+    )
+    balance = compute_balance(current_username, get_partner_username(current_username), dataframe) if current_username else 0.0
+    return {
+        "total_amount": total_amount,
+        "personal_total": personal_total,
+        "shared_total": shared_total,
+        "balance": float(balance),
+        "count": int(len(dataframe.index)),
+    }
+
+
+def _build_income_list_summary(dataframe: pd.DataFrame) -> dict:
+    top_source = ""
+    if not dataframe.empty:
+        grouped = dataframe.groupby("source")["amount"].sum().sort_values(ascending=False)
+        top_source = str(grouped.index[0]) if not grouped.empty else ""
+    return {
+        "total_amount": float(dataframe["amount"].sum()) if not dataframe.empty else 0.0,
+        "count": int(len(dataframe.index)),
+        "top_source": top_source,
+    }
 
 
 def _ensure_valid_expense_payload(payload: ExpensePayload, current_username: str) -> ExpensePayload:
@@ -308,6 +371,44 @@ def get_dashboard(current_user: CurrentUser, month_label: str = "Tutti") -> dict
     }
 
 
+@app.get("/api/calendar", response_model=CalendarResponse)
+def get_calendar(
+    current_user: CurrentUser,
+    month_label: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    content_filter: str = "all",
+    preview_limit: int = 3,
+) -> dict:
+    current_username = current_user["username"]
+    try:
+        return build_calendar_data(
+            _build_expense_frame(current_username),
+            _build_income_frame(current_username),
+            month_label=month_label,
+            year=year,
+            month=month,
+            content_filter=content_filter,
+            preview_limit=preview_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@app.get("/api/calendar/day/{date_value}", response_model=CalendarDayDetailResponse)
+def get_calendar_day(date_value: date, current_user: CurrentUser, content_filter: str = "all") -> dict:
+    current_username = current_user["username"]
+    try:
+        return build_calendar_day_detail(
+            _build_expense_frame(current_username),
+            _build_income_frame(current_username),
+            day=date_value,
+            content_filter=content_filter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 @app.get("/api/expenses")
 def list_expenses(
     current_user: CurrentUser,
@@ -316,18 +417,44 @@ def list_expenses(
     payer: str = "Tutti",
     expense_type: str = "Tutte",
     search: str = "",
+    sort: str = "date_desc",
 ) -> dict:
     current_username = current_user["username"]
     filtered = _filter_expenses(current_username, month_label, category, payer, expense_type, search)
+    filtered = _sort_expenses(filtered, sort)
     return {
         "items": serialize_expense_frame(filtered),
         "count": int(len(filtered.index)),
+        "summary": _build_expense_list_summary(filtered, current_username),
         "month_options": get_month_options(_build_expense_frame(current_username)),
         "filters": {
             "category_options": ["Tutte"] + get_categories(),
             "payer_options": ["Tutti"] + list(get_couple_usernames()),
             "expense_type_options": ["Tutte"] + EXPENSE_TYPE_OPTIONS,
+            "sort_options": [
+                {"value": "date_desc", "label": "Data piu recente"},
+                {"value": "amount_desc", "label": "Importo maggiore"},
+                {"value": "amount_asc", "label": "Importo minore"},
+            ],
         },
+    }
+
+
+@app.post("/api/expenses/bulk-delete")
+def bulk_delete_expenses(payload: BulkDeletePayload, current_user: CurrentUser) -> dict:
+    deleted_ids = []
+    skipped_ids = []
+    for expense_id in payload.ids:
+        if delete_expense(int(expense_id), current_user["username"]):
+            deleted_ids.append(int(expense_id))
+        else:
+            skipped_ids.append(int(expense_id))
+    return {
+        "message": "Spese eliminate con successo." if deleted_ids else "Nessuna spesa eliminata.",
+        "deleted_ids": deleted_ids,
+        "skipped_ids": skipped_ids,
+        "deleted_count": len(deleted_ids),
+        "skipped_count": len(skipped_ids),
     }
 
 
@@ -401,13 +528,23 @@ def list_incomes(
     current_user: CurrentUser,
     month_label: str = "Tutti",
     search: str = "",
+    sort: str = "date_desc",
 ) -> dict:
     current_username = current_user["username"]
     filtered = _filter_incomes(current_username, month_label, search)
+    filtered = _sort_incomes(filtered, sort)
     return {
         "items": serialize_income_frame(filtered),
         "count": int(len(filtered.index)),
+        "summary": _build_income_list_summary(filtered),
         "month_options": get_month_options(_build_income_frame(current_username)),
+        "filters": {
+            "sort_options": [
+                {"value": "date_desc", "label": "Data piu recente"},
+                {"value": "amount_desc", "label": "Importo maggiore"},
+                {"value": "amount_asc", "label": "Importo minore"},
+            ],
+        },
     }
 
 
@@ -456,25 +593,36 @@ def delete_income_endpoint(income_id: int, current_user: CurrentUser) -> dict:
     return {"message": "Entrata eliminata con successo."}
 
 
-@app.get("/api/couple-balance")
+@app.get("/api/couple-balance", response_model=CoupleBalanceResponse)
 def get_couple_balance_view(
     current_user: CurrentUser,
     month_label: str = "Tutti",
+    year: int | None = None,
+    month: int | None = None,
     status_filter: str = "all",
-) -> dict:
+    category: str = "Tutte",
+) -> CoupleBalanceResponse:
     current_username = current_user["username"]
     shared = get_shared_expenses()
     shared = get_visible_expenses(shared, current_username)
-    if month_label != "Tutti":
-        shared = shared[shared["month_label"] == month_label]
+    try:
+        return build_couple_balance_data(
+            shared,
+            current_username,
+            month_label=month_label,
+            year=year,
+            month=month,
+            status_filter=status_filter,
+            category=category,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    if status_filter == "open":
-        shared = shared[~shared["is_settled"].astype(bool)]
-    elif status_filter == "settled":
-        shared = shared[shared["is_settled"].astype(bool)]
 
-    return {
-        "summary": serialize_couple_balance(shared, current_username),
-        "items": serialize_expense_frame(shared),
-        "month_options": get_month_options(get_shared_expenses()),
-    }
+@app.patch("/api/couple-balance/{expense_id}/settled")
+def update_couple_balance_settled(expense_id: int, payload: SettledPayload, current_user: CurrentUser) -> dict:
+    expense = get_expense_by_id(expense_id, current_user["username"])
+    if expense is None or expense.get("expense_type") != "Condivisa":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Spesa condivisa non trovata.")
+    update_expense_settled(expense_id, payload.is_settled)
+    return {"message": "Stato saldo aggiornato con successo."}

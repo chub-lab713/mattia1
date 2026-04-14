@@ -111,6 +111,8 @@ def run_checks() -> None:
             client.request("GET", "/api/categories", expected_status=401)
             client.request("GET", "/api/meta/options", expected_status=401)
             client.request("GET", "/api/couple-balance", expected_status=401)
+            client.request("GET", "/api/calendar", expected_status=401)
+            client.request("GET", "/api/calendar/day/2026-04-07", expected_status=401)
             login = client.request(
                 "POST",
                 "/api/auth/login",
@@ -170,6 +172,30 @@ def run_checks() -> None:
             )
             owned_expense_id = int(client.request("GET", "/api/expenses", query={"search": "Expense Ownership"})["items"][0]["id"])
 
+            calendar_all = client.request("GET", "/api/calendar", query={"month_label": "2026-04", "content_filter": "all"})
+            assert calendar_all["month"]["label"] == "2026-04"
+            assert calendar_all["month"]["prev_month_label"] == "2026-03"
+            assert calendar_all["month"]["next_month_label"] == "2026-05"
+            assert calendar_all["summary"]["event_count"] >= 2
+            calendar_days = [day for week in calendar_all["weeks"] for day in week["days"]]
+            calendar_day = next(day for day in calendar_days if day["date"] == "2026-04-07")
+            assert calendar_day["event_count"] >= 2
+            assert calendar_day["total_expenses"] >= 44.0
+            assert calendar_day["total_incomes"] >= 111.0
+            assert any(day["date"] == "2026-03-30" and not day["is_current_month"] for day in calendar_days)
+
+            calendar_incomes = client.request("GET", "/api/calendar", query={"month_label": "2026-04", "content_filter": "incomes"})
+            assert calendar_incomes["summary"]["income_count"] >= 1
+            assert calendar_incomes["summary"]["expense_count"] == 0
+
+            calendar_expenses = client.request("GET", "/api/calendar", query={"year": 2026, "month": 4, "content_filter": "expenses", "preview_limit": 1})
+            assert calendar_expenses["summary"]["expense_count"] >= 1
+            assert calendar_expenses["summary"]["income_count"] == 0
+
+            day_detail = client.request("GET", "/api/calendar/day/2026-04-07")
+            assert day_detail["day"]["event_count"] >= 2
+            assert day_detail["day"]["remaining_count"] == 0
+
             dashboard = client.request("GET", "/api/dashboard")
             assert "metrics" in dashboard
 
@@ -203,8 +229,23 @@ def run_checks() -> None:
             )
             expenses_after_create = client.request("GET", "/api/expenses", query={"search": "Spesa API"})
             assert expenses_after_create["count"] == 1
+            assert "summary" in expenses_after_create and expenses_after_create["summary"]["total_amount"] >= 88.5
+            sorted_expenses = client.request("GET", "/api/expenses", query={"month_label": "2026-04", "sort": "amount_desc"})
+            assert "sort_options" in sorted_expenses["filters"]
             expense_id = int(expenses_after_create["items"][0]["id"])
             assert client.request("GET", f"/api/expenses/{expense_id}")["item"]["name"] == "Spesa API"
+            balance_open = client.request(
+                "GET",
+                "/api/couple-balance",
+                query={"month_label": "2026-04", "status_filter": "open", "category": "Casa"},
+            )
+            assert balance_open["period"]["label"] == "2026-04"
+            assert balance_open["period"]["prev_month_label"] == "2026-03"
+            assert balance_open["period"]["next_month_label"] == "2026-05"
+            assert balance_open["summary"]["total_unsettled"] >= 88.5
+            assert balance_open["summary"]["filtered_items"] >= 1
+            assert balance_open["items"][0]["is_shared"] is True
+            assert balance_open["items"][0]["status_label"] == "Da regolare"
 
             client.request("POST", "/api/auth/logout")
             client.request("POST", "/api/auth/login", payload={"username": "compagna", "password": "demo123"})
@@ -242,9 +283,15 @@ def run_checks() -> None:
             assert client.request("GET", f"/api/expenses/{expense_id}")["item"]["name"] == "Spesa API"
             client.request(
                 "PATCH",
-                f"/api/expenses/{expense_id}/settled",
+                f"/api/couple-balance/{expense_id}/settled",
                 payload={"is_settled": True},
             )
+            balance_settled = client.request(
+                "GET",
+                "/api/couple-balance",
+                query={"month_label": "2026-04", "status_filter": "settled", "category": "Casa"},
+            )
+            assert any(int(item["id"]) == expense_id and item["settled"] is True for item in balance_settled["items"])
 
             client.request("POST", "/api/auth/logout")
             client.request("POST", "/api/auth/login", payload={"username": "mattia_api", "password": "secret123"})
@@ -267,6 +314,26 @@ def run_checks() -> None:
             assert updated_expense["item"]["name"] == "Spesa API aggiornata"
             couple_balance = client.request("GET", "/api/couple-balance")
             assert "summary" in couple_balance
+            client.request(
+                "POST",
+                "/api/expenses",
+                payload={
+                    "expense_date": "2026-04-12",
+                    "amount": 12.0,
+                    "name": "Bulk API",
+                    "category": "Altro",
+                    "description": "Bulk delete check",
+                    "paid_by": "mattia_api",
+                    "expense_type": "Personale",
+                    "split_type": "equal",
+                    "split_ratio": 1.0,
+                },
+                expected_status=201,
+            )
+            bulk_expense = client.request("GET", "/api/expenses", query={"search": "Bulk API"})
+            bulk_expense_id = int(bulk_expense["items"][0]["id"])
+            bulk_delete = client.request("POST", "/api/expenses/bulk-delete", payload={"ids": [bulk_expense_id]})
+            assert bulk_delete["deleted_count"] == 1
             client.request("DELETE", f"/api/expenses/{expense_id}")
             expenses_after_delete = client.request("GET", "/api/expenses")
             assert expenses_after_delete["count"] == initial_expense_count
@@ -286,6 +353,9 @@ def run_checks() -> None:
             )
             incomes_after_create = client.request("GET", "/api/incomes", query={"search": "Test API"})
             assert incomes_after_create["count"] == 1
+            assert "summary" in incomes_after_create and incomes_after_create["summary"]["total_amount"] >= 321.0
+            sorted_incomes = client.request("GET", "/api/incomes", query={"month_label": "2026-04", "sort": "amount_desc"})
+            assert "sort_options" in sorted_incomes["filters"]
             income_id = int(incomes_after_create["items"][0]["id"])
             assert client.request("GET", f"/api/incomes/{income_id}")["item"]["source"] == "Test API"
             client.request(

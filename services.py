@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import calendar
 from datetime import date, datetime
 from io import StringIO
 from io import BytesIO
@@ -33,6 +34,20 @@ CATEGORY_OPTIONS = [
     "Regali",
     "Altro",
 ]
+CALENDAR_MONTH_NAMES = {
+    "01": "Gennaio",
+    "02": "Febbraio",
+    "03": "Marzo",
+    "04": "Aprile",
+    "05": "Maggio",
+    "06": "Giugno",
+    "07": "Luglio",
+    "08": "Agosto",
+    "09": "Settembre",
+    "10": "Ottobre",
+    "11": "Novembre",
+    "12": "Dicembre",
+}
 
 
 def authenticate_user(username: str, password: str) -> dict | None:
@@ -706,6 +721,199 @@ def compute_couple_balance(current_username: str, dataframe: pd.DataFrame | None
     return compute_balance(current_username, partner_username, shared_expenses)
 
 
+def build_couple_balance_data(
+    shared_expenses: pd.DataFrame,
+    current_username: str,
+    *,
+    month_label: str | None = "Tutti",
+    year: int | None = None,
+    month: int | None = None,
+    status_filter: str = "open",
+    category: str = "Tutte",
+) -> dict:
+    period = _resolve_couple_balance_period(month_label, year, month)
+    period_expenses = _filter_couple_balance_period(shared_expenses, period["label"])
+    period_expenses = period_expenses[period_expenses["expense_type"] == "Condivisa"].copy() if not period_expenses.empty else period_expenses.copy()
+    summary_expenses = _filter_couple_balance_category(period_expenses, category)
+    filtered_expenses = filter_couple_balance_expenses(summary_expenses, status_filter, "Tutte")
+
+    return {
+        "period": period,
+        "status_filter": _normalize_couple_balance_status(status_filter),
+        "category": category if category else "Tutte",
+        "summary": _build_couple_balance_summary(summary_expenses, filtered_expenses, current_username),
+        "items": [
+            _build_couple_balance_item(row, current_username)
+            for row in filtered_expenses.sort_values(["expense_date", "id"], ascending=[False, False]).to_dict(orient="records")
+        ],
+        "filters": {
+            "status_options": [
+                {"value": "open", "label": "Da regolare"},
+                {"value": "settled", "label": "Pagate"},
+                {"value": "all", "label": "Tutte"},
+            ],
+            "category_options": ["Tutte"] + _get_expense_categories(period_expenses),
+        },
+        "month_options": get_month_options(shared_expenses),
+    }
+
+
+def filter_couple_balance_expenses(
+    dataframe: pd.DataFrame,
+    status_filter: str,
+    category: str = "Tutte",
+) -> pd.DataFrame:
+    filtered = dataframe.copy()
+    normalized_status = _normalize_couple_balance_status(status_filter)
+
+    if normalized_status == "open":
+        filtered = filtered[~filtered["is_settled"].astype(bool)].copy() if not filtered.empty else filtered
+    elif normalized_status == "settled":
+        filtered = filtered[filtered["is_settled"].astype(bool)].copy() if not filtered.empty else filtered
+
+    return _filter_couple_balance_category(filtered, category)
+
+
+def _resolve_couple_balance_period(month_label: str | None, year: int | None, month: int | None) -> dict:
+    if year is not None and month is not None:
+        label = resolve_calendar_month(year=year, month=month)
+    elif month_label and month_label != "Tutti":
+        label = resolve_calendar_month(month_label=month_label)
+    else:
+        current_label = date.today().strftime("%Y-%m")
+        return {
+            "label": "Tutti",
+            "title": "Tutti i mesi",
+            "year": None,
+            "month": None,
+            "is_all_time": True,
+            "prev_month_label": shift_calendar_month(current_label, -1),
+            "next_month_label": shift_calendar_month(current_label, 1),
+        }
+
+    year_text, month_text = label.split("-")
+    return {
+        "label": label,
+        "title": f"{CALENDAR_MONTH_NAMES.get(month_text, month_text)} {year_text}",
+        "year": int(year_text),
+        "month": int(month_text),
+        "is_all_time": False,
+        "prev_month_label": shift_calendar_month(label, -1),
+        "next_month_label": shift_calendar_month(label, 1),
+    }
+
+
+def _filter_couple_balance_period(dataframe: pd.DataFrame, month_label: str) -> pd.DataFrame:
+    if dataframe.empty or month_label == "Tutti":
+        return dataframe.copy()
+    return dataframe[dataframe["month_label"] == month_label].copy()
+
+
+def _filter_couple_balance_category(dataframe: pd.DataFrame, category: str) -> pd.DataFrame:
+    if dataframe.empty or not category or category == "Tutte":
+        return dataframe.copy()
+    return dataframe[dataframe["category"] == category].copy()
+
+
+def _normalize_couple_balance_status(status_filter: str) -> str:
+    normalized = (status_filter or "open").strip().lower()
+    aliases = {
+        "open": "open",
+        "unsettled": "open",
+        "da_regolare": "open",
+        "da regolare": "open",
+        "settled": "settled",
+        "pagate": "settled",
+        "all": "all",
+        "tutte": "all",
+    }
+    if normalized not in aliases:
+        raise ValueError("Filtro stato saldo non valido.")
+    return aliases[normalized]
+
+
+def _build_couple_balance_summary(summary_expenses: pd.DataFrame, filtered_expenses: pd.DataFrame, current_username: str) -> dict:
+    unsettled_expenses = summary_expenses[~summary_expenses["is_settled"].astype(bool)].copy() if not summary_expenses.empty else summary_expenses
+    balance = compute_couple_balance(current_username, summary_expenses)
+    shared_total = float(summary_expenses["amount"].sum()) if not summary_expenses.empty else 0.0
+    unsettled_total = float(unsettled_expenses["amount"].sum()) if not unsettled_expenses.empty else 0.0
+    open_items = int((~summary_expenses["is_settled"].astype(bool)).sum()) if not summary_expenses.empty else 0
+    settled_items = int(summary_expenses["is_settled"].astype(bool).sum()) if not summary_expenses.empty else 0
+
+    return {
+        "balance": float(balance),
+        "balance_value": float(balance),
+        "balance_label": _build_couple_balance_label(balance),
+        "shared_total": shared_total,
+        "total_shared": shared_total,
+        "unsettled_total": unsettled_total,
+        "total_unsettled": unsettled_total,
+        "open_items": open_items,
+        "settled_items": settled_items,
+        "total_items": int(len(summary_expenses.index)),
+        "filtered_items": int(len(filtered_expenses.index)),
+    }
+
+
+def _build_couple_balance_item(row: dict, current_username: str) -> dict:
+    amount = float(row["amount"])
+    payer_share_ratio = _get_payer_share(pd.Series(row))
+    payer_share = amount * payer_share_ratio
+    partner_share = amount - payer_share
+    paid_by = str(row.get("paid_by") or "")
+    is_current_payer = paid_by == current_username
+    balance_impact = partner_share if is_current_payer else -partner_share
+    status_label = "Pagata" if bool(row.get("is_settled", False)) else "Da regolare"
+
+    return {
+        "id": int(row["id"]),
+        "date": _format_date_value(row.get("expense_date")),
+        "expense_date": _format_date_value(row.get("expense_date")),
+        "name": row.get("name", ""),
+        "description": row.get("description", ""),
+        "category": row.get("category", ""),
+        "amount": amount,
+        "paid_by": paid_by,
+        "owner": row.get("owner"),
+        "counterpart": get_partner_username(current_username) if current_username else "",
+        "is_shared": True,
+        "is_settled": bool(row.get("is_settled", False)),
+        "settled": bool(row.get("is_settled", False)),
+        "split_type": row.get("split_type", "equal"),
+        "split_ratio": float(row.get("split_ratio", 0.5) or 0.5),
+        "payer_share": float(payer_share),
+        "partner_share": float(partner_share),
+        "status_label": status_label,
+        "action_label": "Ricevuta" if is_current_payer else "Pagata",
+        "balance_impact": float(balance_impact),
+        "month_label": row.get("month_label"),
+    }
+
+
+def _build_couple_balance_label(balance: float) -> str:
+    if balance > 0:
+        return "Mi devono"
+    if balance < 0:
+        return "Devo"
+    return "Siamo in pari"
+
+
+def _get_expense_categories(dataframe: pd.DataFrame) -> list[str]:
+    if dataframe.empty:
+        return []
+    return sorted(dataframe["category"].dropna().astype(str).unique().tolist())
+
+
+def _format_date_value(value: object) -> str:
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value or "")
+
+
 def get_month_options(dataframe: pd.DataFrame) -> list[str]:
     current_month = date.today().strftime("%Y-%m")
     if dataframe.empty:
@@ -716,6 +924,235 @@ def get_month_options(dataframe: pd.DataFrame) -> list[str]:
         months.append(current_month)
     months = sorted(months, reverse=True)
     return ["Tutti"] + months
+
+
+def resolve_calendar_month(month_label: str | None = None, year: int | None = None, month: int | None = None) -> str:
+    if year is not None and month is not None:
+        if month < 1 or month > 12:
+            raise ValueError("Mese non valido.")
+        return f"{int(year):04d}-{int(month):02d}"
+
+    if month_label and month_label != "Tutti":
+        try:
+            year_text, month_text = month_label.split("-")
+            resolved_year = int(year_text)
+            resolved_month = int(month_text)
+        except ValueError as exc:
+            raise ValueError("Formato mese non valido.") from exc
+        if resolved_month < 1 or resolved_month > 12:
+            raise ValueError("Mese non valido.")
+        return f"{resolved_year:04d}-{resolved_month:02d}"
+
+    return date.today().strftime("%Y-%m")
+
+
+def shift_calendar_month(month_label: str, delta: int) -> str:
+    year_text, month_text = resolve_calendar_month(month_label).split("-")
+    year = int(year_text)
+    month = int(month_text) + delta
+
+    while month < 1:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+
+    return f"{year:04d}-{month:02d}"
+
+
+def build_calendar_data(
+    expenses: pd.DataFrame,
+    incomes: pd.DataFrame,
+    *,
+    month_label: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
+    content_filter: str = "all",
+    preview_limit: int = 3,
+) -> dict:
+    active_month_label = resolve_calendar_month(month_label, year, month)
+    active_year_text, active_month_text = active_month_label.split("-")
+    active_year = int(active_year_text)
+    active_month = int(active_month_text)
+    normalized_filter = _normalize_calendar_filter(content_filter)
+    safe_preview_limit = max(0, int(preview_limit))
+
+    month_expenses = _filter_calendar_expenses(expenses, active_month_label, normalized_filter)
+    month_incomes = _filter_calendar_incomes(incomes, active_month_label, normalized_filter)
+    events_by_date = _build_calendar_events_by_date(month_expenses, month_incomes)
+    expense_totals = _build_daily_totals(month_expenses, "expense_date")
+    income_totals = _build_daily_totals(month_incomes, "income_date")
+
+    calendar_rows = calendar.Calendar(firstweekday=0).monthdatescalendar(active_year, active_month)
+    today = date.today()
+    weeks = []
+
+    for week in calendar_rows:
+        week_days = []
+        for day in week:
+            iso_date = day.isoformat()
+            day_events = events_by_date.get(iso_date, []) if day.month == active_month else []
+            expense_total = float(expense_totals.get(iso_date, 0.0)) if day.month == active_month else 0.0
+            income_total = float(income_totals.get(iso_date, 0.0)) if day.month == active_month else 0.0
+            week_days.append(
+                {
+                    "date": iso_date,
+                    "day_number": day.day,
+                    "is_current_month": day.month == active_month,
+                    "is_today": day == today,
+                    "total_expenses": expense_total,
+                    "total_incomes": income_total,
+                    "net_total": income_total - expense_total,
+                    "events": day_events,
+                    "event_count": len(day_events),
+                    "preview_events": day_events[:safe_preview_limit],
+                    "remaining_count": max(0, len(day_events) - safe_preview_limit),
+                }
+            )
+        weeks.append({"days": week_days})
+
+    return {
+        "month": {
+            "label": active_month_label,
+            "year": active_year,
+            "month": active_month,
+            "title": f"{CALENDAR_MONTH_NAMES.get(active_month_text, active_month_text)} {active_year_text}",
+            "prev_month_label": shift_calendar_month(active_month_label, -1),
+            "next_month_label": shift_calendar_month(active_month_label, 1),
+        },
+        "content_filter": normalized_filter,
+        "weekdays": ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"],
+        "weeks": weeks,
+        "summary": {
+            "total_expenses": float(month_expenses["amount"].sum()) if not month_expenses.empty else 0.0,
+            "total_incomes": float(month_incomes["amount"].sum()) if not month_incomes.empty else 0.0,
+            "net_total": (
+                float(month_incomes["amount"].sum()) if not month_incomes.empty else 0.0
+            ) - (
+                float(month_expenses["amount"].sum()) if not month_expenses.empty else 0.0
+            ),
+            "expense_count": int(len(month_expenses.index)),
+            "income_count": int(len(month_incomes.index)),
+            "event_count": int(len(month_expenses.index) + len(month_incomes.index)),
+        },
+    }
+
+
+def build_calendar_day_detail(
+    expenses: pd.DataFrame,
+    incomes: pd.DataFrame,
+    *,
+    day: date,
+    content_filter: str = "all",
+) -> dict:
+    calendar_data = build_calendar_data(
+        expenses,
+        incomes,
+        year=day.year,
+        month=day.month,
+        content_filter=content_filter,
+        preview_limit=10_000,
+    )
+    target = day.isoformat()
+    for week in calendar_data["weeks"]:
+        for calendar_day in week["days"]:
+            if calendar_day["date"] == target:
+                calendar_day["preview_events"] = calendar_day["events"]
+                calendar_day["remaining_count"] = 0
+                return {
+                    "date": target,
+                    "content_filter": calendar_data["content_filter"],
+                    "day": calendar_day,
+                }
+
+    return {
+        "date": target,
+        "content_filter": calendar_data["content_filter"],
+        "day": None,
+    }
+
+
+def _normalize_calendar_filter(content_filter: str) -> str:
+    normalized = (content_filter or "all").strip().lower()
+    aliases = {
+        "tutto": "all",
+        "all": "all",
+        "entrate": "incomes",
+        "incomes": "incomes",
+        "uscite": "expenses",
+        "expenses": "expenses",
+    }
+    if normalized not in aliases:
+        raise ValueError("Filtro calendario non valido.")
+    return aliases[normalized]
+
+
+def _filter_calendar_expenses(dataframe: pd.DataFrame, month_label: str, content_filter: str) -> pd.DataFrame:
+    if dataframe.empty or content_filter == "incomes":
+        return dataframe.iloc[0:0].copy()
+    return dataframe[dataframe["month_label"] == month_label].copy()
+
+
+def _filter_calendar_incomes(dataframe: pd.DataFrame, month_label: str, content_filter: str) -> pd.DataFrame:
+    if dataframe.empty or content_filter == "expenses":
+        return dataframe.iloc[0:0].copy()
+    return dataframe[dataframe["month_label"] == month_label].copy()
+
+
+def _build_daily_totals(dataframe: pd.DataFrame, date_column: str) -> dict[str, float]:
+    if dataframe.empty:
+        return {}
+    totals = dataframe.groupby(dataframe[date_column].dt.date)["amount"].sum().to_dict()
+    return {day.isoformat(): float(total) for day, total in totals.items()}
+
+
+def _build_calendar_events_by_date(expenses: pd.DataFrame, incomes: pd.DataFrame) -> dict[str, list[dict]]:
+    events_by_date: dict[str, list[dict]] = {}
+
+    if not expenses.empty:
+        for _, row in expenses.sort_values(["expense_date", "id"]).iterrows():
+            event_date = row["expense_date"].date()
+            title = str(row.get("name") or row.get("description") or row.get("category") or "Spesa")
+            events_by_date.setdefault(event_date.isoformat(), []).append(
+                {
+                    "id": int(row["id"]),
+                    "type": "expense",
+                    "title": title,
+                    "amount": float(row["amount"]),
+                    "category": row.get("category", ""),
+                    "source": "",
+                    "owner": row.get("owner"),
+                    "paid_by": row.get("paid_by", ""),
+                    "date": event_date.isoformat(),
+                    "is_shared": row.get("expense_type") == "Condivisa",
+                    "settled": bool(row.get("is_settled", False)),
+                    "display_label": title,
+                }
+            )
+
+    if not incomes.empty:
+        for _, row in incomes.sort_values(["income_date", "id"]).iterrows():
+            event_date = row["income_date"].date()
+            title = str(row.get("source") or row.get("description") or "Entrata")
+            events_by_date.setdefault(event_date.isoformat(), []).append(
+                {
+                    "id": int(row["id"]),
+                    "type": "income",
+                    "title": title,
+                    "amount": float(row["amount"]),
+                    "category": "",
+                    "source": row.get("source", ""),
+                    "owner": row.get("owner", ""),
+                    "paid_by": "",
+                    "date": event_date.isoformat(),
+                    "is_shared": False,
+                    "settled": None,
+                    "display_label": title,
+                }
+            )
+
+    return events_by_date
 
 
 def get_expense_by_id(expense_id: int, current_username: str) -> dict | None:

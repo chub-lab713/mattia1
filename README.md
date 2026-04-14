@@ -61,6 +61,7 @@ Streamlit resta disponibile come interfaccia legacy/temporanea finché la migraz
 ├── ui_helpers.py
 ├── requirements.txt
 ├── README.md
+├── run-dev.sh
 └── data/
     └── spese.db
 ```
@@ -85,28 +86,48 @@ npm install
 
 ## Avvio rapido
 
-### A. Backend FastAPI
+### Modalità consigliata: avvio completo
+
+```bash
+cd "/Users/mattiabonuso/Documents/New project"
+./run-dev.sh
+```
+
+Questo comando avvia insieme:
+
+- backend FastAPI su `http://127.0.0.1:8000`
+- frontend React/Vite su `http://127.0.0.1:5173`, oppure sulla porta mostrata da Vite se `5173` è occupata
+
+Premi `Ctrl+C` nello stesso terminale per fermare entrambi i processi.
+
+## Avvio manuale alternativo
+
+Usa questi comandi solo se vuoi avviare backend e frontend separatamente.
+
+### Backend FastAPI
 
 ```bash
 cd "/Users/mattiabonuso/Documents/New project"
 source .venv/bin/activate
-uvicorn backend.main:app --reload
+uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### B. Frontend React
+### Frontend React
 
 ```bash
 cd "/Users/mattiabonuso/Documents/New project/frontend"
 npm run dev
 ```
 
-### C. Streamlit legacy
+### Streamlit legacy
 
 ```bash
 cd "/Users/mattiabonuso/Documents/New project"
 source .venv/bin/activate
 streamlit run app.py
 ```
+
+Streamlit resta disponibile come interfaccia legacy per compatibilità e migrazione graduale.
 
 ## URL locali
 
@@ -140,7 +161,6 @@ La UI Streamlit resta disponibile come interfaccia legacy.
 - Le migrazioni vengono applicate in automatico sul database locale esistente
 - Se `reportlab` non è installato, l'esportazione PDF resta disattivata
 - In sviluppo locale il frontend React usa il proxy `/api` verso FastAPI
+- Il comando consigliato `./run-dev.sh` non installa dipendenze: esegui prima `pip install -r requirements.txt` e `cd frontend && npm install`
 - Se la porta `5173` è occupata, Vite userà un'altra porta: usa quella mostrata nel terminale
 - FastAPI/React e Streamlit possono coesistere temporaneamente durante la migrazione
-# rob.couple
-# rob.couple

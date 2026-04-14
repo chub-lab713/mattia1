@@ -1,38 +1,52 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { api } from "../lib/api";
-import { StatusView } from "../components/StatusView";
 import { Dialog } from "../components/Dialog";
 import { FeedbackBanner } from "../components/FeedbackBanner";
+import { MonthNavigation } from "../components/MonthNavigation";
+import { StatusView } from "../components/StatusView";
 import { useAuth } from "../context/AuthContext";
+import { api } from "../lib/api";
+
+const defaultFilters = {
+  month_label: getCurrentMonthLabel(),
+  category: "Tutte",
+  payer: "Tutti",
+  expense_type: "Tutte",
+  search: "",
+  sort: "date_desc",
+};
 
 export function ExpensesPage() {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState(null);
   const [meta, setMeta] = useState(null);
-  const [filters, setFilters] = useState({
-    month_label: "Tutti",
-    category: "Tutte",
-    payer: "Tutti",
-    expense_type: "Tutte",
-    search: "",
-  });
+  const [filters, setFilters] = useState(defaultFilters);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [feedbackType, setFeedbackType] = useState("success");
   const [dialogMode, setDialogMode] = useState(null);
   const [selectedExpenseId, setSelectedExpenseId] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [isDeleteMode, setIsDeleteMode] = useState(false);
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
   const [form, setForm] = useState(createDefaultExpenseForm(""));
   const summaryMode = searchParams.get("summary");
 
-  const payerOptions = useMemo(() => meta?.usernames || data?.filters?.payer_options?.filter((item) => item !== "Tutti") || [], [meta, data]);
-  const categoryOptions = useMemo(() => meta?.categories || data?.filters?.category_options?.filter((item) => item !== "Tutte") || [], [meta, data]);
+  const payerOptions = useMemo(() => meta?.usernames || [], [meta]);
+  const categoryOptions = useMemo(() => meta?.categories || [], [meta]);
   const splitOptions = meta?.split_options || ["equal", "custom"];
   const expenseTypeOptions = meta?.expense_types || ["Personale", "Condivisa"];
+  const monthOptions = useMemo(() => data?.month_options || ["Tutti"], [data]);
+  const sortOptions = data?.filters?.sort_options || [
+    { value: "date_desc", label: "Data piu recente" },
+    { value: "amount_desc", label: "Importo maggiore" },
+    { value: "amount_asc", label: "Importo minore" },
+  ];
 
   useEffect(() => {
     if (!user?.username) {
@@ -43,30 +57,21 @@ export function ExpensesPage() {
 
   useEffect(() => {
     const nextFilters = {
-      month_label: searchParams.get("month_label") || "Tutti",
+      month_label: searchParams.get("month_label") || getCurrentMonthLabel(),
       category: searchParams.get("category") || "Tutte",
       payer: searchParams.get("payer") || "Tutti",
       expense_type: searchParams.get("expense_type") || "Tutte",
       search: searchParams.get("search") || "",
+      sort: searchParams.get("sort") || "date_desc",
     };
-
-    setFilters((current) => {
-      if (JSON.stringify(current) === JSON.stringify(nextFilters)) {
-        return current;
-      }
-      return nextFilters;
-    });
+    setFilters((current) => (sameObject(current, nextFilters) ? current : nextFilters));
   }, [searchParams]);
 
   useEffect(() => {
     if (searchParams.get("action") !== "new") {
       return;
     }
-
-    setDialogMode("create");
-    setSelectedExpenseId(null);
-    setFormError("");
-    setForm(createDefaultExpenseForm(user?.username || ""));
+    openCreateDialog();
     const next = new URLSearchParams(searchParams);
     next.delete("action");
     setSearchParams(next, { replace: true });
@@ -78,17 +83,15 @@ export function ExpensesPage() {
     async function bootstrap() {
       setIsLoading(true);
       setError("");
-
       try {
         const [expensesResponse, metaResponse] = await Promise.all([
           fetchExpenses(filters),
           api.get("/api/meta/options"),
         ]);
-        if (!isMounted) {
-          return;
+        if (isMounted) {
+          setData(expensesResponse);
+          setMeta(metaResponse);
         }
-        setData(expensesResponse);
-        setMeta(metaResponse);
       } catch (requestError) {
         if (isMounted) {
           setError(requestError.message || "Impossibile caricare le spese.");
@@ -111,7 +114,6 @@ export function ExpensesPage() {
     if (!data) {
       return;
     }
-
     let isMounted = true;
 
     async function refreshList() {
@@ -119,6 +121,7 @@ export function ExpensesPage() {
         const response = await fetchExpenses(filters);
         if (isMounted) {
           setData(response);
+          setSelectedIds([]);
         }
       } catch (requestError) {
         if (isMounted) {
@@ -146,177 +149,113 @@ export function ExpensesPage() {
     return <StatusView title="Spese" message="Nessun dato disponibile." />;
   }
 
+  const visibleIds = data.items.map((item) => item.id);
+  const allVisibleSelected = visibleIds.length > 0 && selectedIds.length === visibleIds.length;
+
   return (
-    <section className="page">
-      <div className="page-header">
+    <section className="page expense-workspace">
+      <div className="page-header expense-page-header">
         <div>
-          <p className="eyebrow">Spese</p>
-          <h2>{summaryMode ? "Riepilogo spese" : "Lista spese"}</h2>
+          <p className="eyebrow">Uscite</p>
+          <h2>{summaryMode ? "Riepilogo spese" : "Spese del periodo"}</h2>
+          <p className="muted">Filtri, modifica e cancellazione sono allineati alla sezione Streamlit.</p>
         </div>
-        <div className="page-actions">
-          <span className="muted">{data.count} risultati</span>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={() => {
-              setDialogMode("create");
-              setSelectedExpenseId(null);
-              setFormError("");
-              setForm(createDefaultExpenseForm(user?.username || ""));
-            }}
-          >
-            Nuova spesa
-          </button>
-        </div>
+        <button type="button" className="primary-button" onClick={openCreateDialog}>
+          Nuova spesa
+        </button>
       </div>
 
+      {filters.month_label ? (
+        <MonthNavigation
+          label={formatMonthHeading(filters.month_label)}
+          onPrevious={() => shiftSelectedMonth(-1)}
+          onNext={() => shiftSelectedMonth(1)}
+        />
+      ) : null}
+
       <FeedbackBanner type={feedbackType} message={feedback} />
-      {summaryMode ? (
-        <div className="panel compact-panel">
-          <p className="eyebrow">Vista operativa</p>
-          <p className="muted">
-            {summaryMode === "net"
-              ? "Questa vista raccoglie le uscite del mese attivo per leggere il saldo del periodo in modo coerente con la dashboard."
-              : "Questa vista usa la sezione Uscite come riepilogo temporaneo del periodo selezionato."}
-          </p>
+
+      <CategoryPillBar
+        categories={data.filters?.category_options || ["Tutte"]}
+        activeCategory={filters.category}
+        onChange={(category) => updateFilter("category", category)}
+      />
+
+      <div className="section-lower-layout">
+        <div className="section-toolbar panel">
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={!filters.search && !isDeleteMode}
+            onClick={handleBackReset}
+          >
+            ←
+          </button>
+          <button
+            type="button"
+            className={`toolbar-button${isFilterPanelOpen ? " active" : ""}`}
+            onClick={() => setIsFilterPanelOpen((current) => !current)}
+          >
+            Filtri
+          </button>
+          <button
+            type="button"
+            className={`toolbar-button wide${isEditMode ? " active" : ""}`}
+            onClick={() => {
+              setIsEditMode((current) => !current);
+              setIsDeleteMode(false);
+              setSelectedIds([]);
+            }}
+          >
+            Modifica spesa
+          </button>
+          <button
+            type="button"
+            className={`toolbar-button danger-lite${isDeleteMode ? " active" : ""}`}
+            onClick={() => {
+              setIsDeleteMode((current) => !current);
+              setIsEditMode(false);
+              setSelectedIds([]);
+            }}
+          >
+            Elimina
+          </button>
+        </div>
+
+        <StickyTotal summary={data.summary} />
+      </div>
+
+      {isFilterPanelOpen ? (
+        <FilterPanel
+          filters={filters}
+          data={data}
+          sortOptions={sortOptions}
+          onChange={updateFilter}
+          onReset={resetFilters}
+        />
+      ) : null}
+
+      {isDeleteMode ? (
+        <div className="delete-action-row panel">
+          <button type="button" className="secondary-button" onClick={() => setSelectedIds(allVisibleSelected ? [] : visibleIds)}>
+            {allVisibleSelected ? "Deseleziona tutte" : "Seleziona tutte"}
+          </button>
+          <span className="muted">{selectedIds.length} selezioni</span>
+          <button type="button" className="danger-button primary-button" disabled={!selectedIds.length || isSubmitting} onClick={handleBulkDelete}>
+            {isSubmitting ? "Eliminazione..." : "Elimina selezionate"}
+          </button>
         </div>
       ) : null}
 
-      <div className="panel filters-grid">
-        <label className="field">
-          <span>Mese</span>
-          <select
-            value={filters.month_label}
-            onChange={(event) => updateFilter("month_label", event.target.value)}
-          >
-            {(data.month_options || []).map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field">
-          <span>Categoria</span>
-          <select
-            value={filters.category}
-            onChange={(event) => updateFilter("category", event.target.value)}
-          >
-            {(data.filters?.category_options || []).map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field">
-          <span>Pagatore</span>
-          <select
-            value={filters.payer}
-            onChange={(event) => updateFilter("payer", event.target.value)}
-          >
-            {(data.filters?.payer_options || []).map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field">
-          <span>Tipo</span>
-          <select
-            value={filters.expense_type}
-            onChange={(event) => updateFilter("expense_type", event.target.value)}
-          >
-            {(data.filters?.expense_type_options || []).map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field field-span">
-          <span>Ricerca</span>
-          <input
-            type="search"
-            value={filters.search}
-            onChange={(event) => updateFilter("search", event.target.value)}
-            placeholder="Nome, descrizione, categoria, pagatore"
-          />
-        </label>
-      </div>
-
-      <div className="panel table-panel">
-        {data.items.length === 0 ? (
-          <p className="muted">Nessuna spesa visibile con i filtri correnti.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Data</th>
-                <th>Nome</th>
-                <th>Categoria</th>
-                <th>Pagata da</th>
-                <th>Tipo</th>
-                <th>Stato</th>
-                <th>Importo</th>
-                <th>Azioni</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.items.map((item) => (
-                <tr key={item.id}>
-                  <td>{item.expense_date}</td>
-                  <td>
-                    <strong>{item.name || item.description}</strong>
-                    <div className="row-subtitle">{item.description}</div>
-                  </td>
-                  <td>{item.category}</td>
-                  <td>{item.paid_by}</td>
-                  <td>{item.expense_type}</td>
-                  <td>
-                    {item.expense_type === "Condivisa" ? (
-                      <label className="toggle-field">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(item.is_settled)}
-                          onChange={() => handleToggleSettled(item)}
-                        />
-                        <span>{item.is_settled ? "Pagata" : "Da regolare"}</span>
-                      </label>
-                    ) : (
-                      <span className="muted">Privata</span>
-                    )}
-                  </td>
-                  <td>{formatCurrency(item.amount)}</td>
-                  <td>
-                    <div className="row-actions">
-                      <button type="button" className="text-button" onClick={() => openEditDialog(item.id)}>
-                        Modifica
-                      </button>
-                      <button
-                        type="button"
-                        className="text-button danger"
-                        onClick={() => {
-                          setDialogMode("delete");
-                          setSelectedExpenseId(item.id);
-                          setFeedback("");
-                        }}
-                      >
-                        Elimina
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <ExpenseFeed
+        items={data.items}
+        currentUsername={user?.username || ""}
+        selectedIds={selectedIds}
+        isEditMode={isEditMode}
+        isDeleteMode={isDeleteMode}
+        onSelect={toggleSelectedId}
+        onEdit={openEditDialog}
+      />
 
       {dialogMode === "create" || dialogMode === "edit" ? (
         <Dialog
@@ -346,30 +285,19 @@ export function ExpensesPage() {
         </Dialog>
       ) : null}
 
-      {dialogMode === "delete" ? (
-        <Dialog
-          title="Conferma eliminazione"
-          onClose={closeDialog}
-          footer={
-            <>
-              <button type="button" className="secondary-button" onClick={closeDialog}>
-                Annulla
-              </button>
-              <button type="button" className="primary-button danger-button" onClick={handleDeleteExpense} disabled={isSubmitting}>
-                {isSubmitting ? "Eliminazione..." : "Elimina"}
-              </button>
-            </>
-          }
-        >
-          <p>Questa spesa verrà eliminata definitivamente.</p>
-        </Dialog>
-      ) : null}
     </section>
   );
 
   async function fetchExpenses(activeFilters) {
     const params = new URLSearchParams(activeFilters);
     return api.get(`/api/expenses?${params.toString()}`);
+  }
+
+  function openCreateDialog() {
+    setDialogMode("create");
+    setSelectedExpenseId(null);
+    setFormError("");
+    setForm(createDefaultExpenseForm(user?.username || ""));
   }
 
   function closeDialog() {
@@ -382,7 +310,7 @@ export function ExpensesPage() {
   function updateFilter(key, value) {
     setFilters((current) => ({ ...current, [key]: value }));
     const next = new URLSearchParams(searchParams);
-    if (value && value !== "Tutti" && value !== "Tutte") {
+    if (value && value !== "Tutti" && value !== "Tutte" && value !== "date_desc") {
       next.set(key, value);
     } else if (key === "search" && value) {
       next.set(key, value);
@@ -390,6 +318,40 @@ export function ExpensesPage() {
       next.delete(key);
     }
     setSearchParams(next, { replace: true });
+  }
+
+  function shiftSelectedMonth(delta) {
+    const options = monthOptions.filter((item) => item !== "Tutti");
+    if (!options.length) {
+      return;
+    }
+    const currentIndex = options.indexOf(filters.month_label);
+    const safeIndex = currentIndex === -1 ? 0 : currentIndex;
+    const nextIndex = Math.max(0, Math.min(options.length - 1, safeIndex + delta));
+    updateFilter("month_label", options[nextIndex]);
+  }
+
+  function handleBackReset() {
+    if (isDeleteMode) {
+      setIsDeleteMode(false);
+      setSelectedIds([]);
+      return;
+    }
+    updateFilter("search", "");
+  }
+
+  function resetFilters() {
+    const nextFilters = { ...defaultFilters, month_label: filters.month_label || getCurrentMonthLabel() };
+    setFilters(nextFilters);
+    const next = new URLSearchParams(searchParams);
+    ["category", "payer", "expense_type", "search", "sort"].forEach((key) => next.delete(key));
+    setSearchParams(next, { replace: true });
+  }
+
+  function toggleSelectedId(expenseId) {
+    setSelectedIds((current) =>
+      current.includes(expenseId) ? current.filter((item) => item !== expenseId) : [...current, expenseId],
+    );
   }
 
   async function refreshExpensesList(message = "", type = "success") {
@@ -404,7 +366,6 @@ export function ExpensesPage() {
     setSelectedExpenseId(expenseId);
     setFormError("");
     setIsSubmitting(false);
-
     try {
       const response = await api.get(`/api/expenses/${expenseId}`);
       setForm(normalizeExpenseForForm(response.item, user?.username || ""));
@@ -421,10 +382,8 @@ export function ExpensesPage() {
       setFormError(validationMessage);
       return;
     }
-
     setIsSubmitting(true);
     setFormError("");
-
     try {
       const payload = buildExpensePayload(form, user?.username || "");
       if (dialogMode === "create") {
@@ -442,42 +401,227 @@ export function ExpensesPage() {
     }
   }
 
-  async function handleDeleteExpense() {
-    if (!selectedExpenseId) {
-      return;
-    }
-
+  async function handleBulkDelete() {
     setIsSubmitting(true);
-
     try {
-      await api.delete(`/api/expenses/${selectedExpenseId}`);
-      await refreshExpensesList("Spesa eliminata con successo.");
-      closeDialog();
+      const response = await api.post("/api/expenses/bulk-delete", { ids: selectedIds });
+      setIsDeleteMode(false);
+      setSelectedIds([]);
+      await refreshExpensesList(`${response.deleted_count} spese eliminate.`);
     } catch (requestError) {
-      setFormError(requestError.message || "Impossibile eliminare la spesa.");
-      setFeedback(requestError.message || "Impossibile eliminare la spesa.");
+      setFeedback(requestError.message || "Impossibile eliminare le spese selezionate.");
       setFeedbackType("error");
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  async function handleToggleSettled(item) {
-    try {
-      await api.patch(`/api/expenses/${item.id}/settled`, { is_settled: !item.is_settled });
-      await refreshExpensesList("Stato spesa aggiornato con successo.");
-    } catch (requestError) {
-      setFeedback(requestError.message || "Impossibile aggiornare lo stato.");
-      setFeedbackType("error");
-    }
-  }
 }
 
-function formatCurrency(value) {
-  return new Intl.NumberFormat("it-IT", {
-    style: "currency",
-    currency: "EUR",
-  }).format(Number(value || 0));
+function CategoryPillBar({ categories, activeCategory, onChange }) {
+  return (
+    <div className="category-pill-bar" aria-label="Categorie uscite">
+      {categories.map((category) => (
+        <button
+          key={category}
+          type="button"
+          className={`category-pill${activeCategory === category ? " active" : ""}`}
+          onClick={() => onChange(category)}
+        >
+          {category}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function FilterPanel({ filters, data, sortOptions, onChange, onReset }) {
+  return (
+    <div className="panel expense-filter-panel">
+      <div className="filter-panel-header">
+        <div>
+          <strong>Filtri uscite</strong>
+          <p className="muted">Compatto come in Streamlit, senza occupare tutta la pagina.</p>
+        </div>
+        <button type="button" className="secondary-button" onClick={onReset}>
+          Reset
+        </button>
+      </div>
+
+      <div className="filters-grid">
+        <label className="field">
+          <span>Tipo vista</span>
+          <select value={filters.expense_type} onChange={(event) => onChange("expense_type", event.target.value)}>
+            <option value="Tutte">Tutte</option>
+            <option value="Personale">Personali</option>
+            <option value="Condivisa">Condivise</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Pagatore</span>
+          <select value={filters.payer} onChange={(event) => onChange("payer", event.target.value)}>
+            {(data.filters?.payer_options || ["Tutti"]).map((option) => (
+              <option key={option} value={option}>{option}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Ordinamento</span>
+          <select value={filters.sort} onChange={(event) => onChange("sort", event.target.value)}>
+            {sortOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field field-span">
+          <span>Ricerca</span>
+          <input
+            type="search"
+            value={filters.search}
+            onChange={(event) => onChange("search", event.target.value)}
+            placeholder="Cerca per nome, note, categoria o pagatore"
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function ExpenseFeed({ items, currentUsername, selectedIds, isEditMode, isDeleteMode, onSelect, onEdit }) {
+  if (!items.length) {
+    return <div className="panel empty-feed">Nessuna spesa trovata con i filtri selezionati.</div>;
+  }
+
+  return (
+    <div className={`transaction-feed${isEditMode ? " edit-focus" : ""}`}>
+      {items.map((item) => {
+        const isShared = item.expense_type === "Condivisa";
+        const isMine = item.paid_by === currentUsername;
+        return (
+          <article key={item.id} className={`transaction-row-card${isDeleteMode ? " delete-mode" : ""}`}>
+            {isDeleteMode ? (
+              <input
+                type="checkbox"
+                aria-label={`Seleziona spesa ${item.id}`}
+                checked={selectedIds.includes(item.id)}
+                onChange={() => onSelect(item.id)}
+              />
+            ) : null}
+            <div className="transaction-date">{formatShortDate(item.expense_date)}</div>
+            <button
+              type="button"
+              className={`transaction-main${isEditMode ? " is-clickable" : ""}`}
+              onClick={() => (isEditMode ? onEdit(item.id) : undefined)}
+            >
+              <strong>{item.name || item.description || "Spesa"}</strong>
+              <span>{item.description || "Nessuna nota"}</span>
+            </button>
+            <span className="transaction-chip">{item.category}</span>
+            <span className="transaction-user">{item.paid_by}</span>
+            <span className="transaction-chip">{isShared ? "Condivisa" : "Personale"}</span>
+            <span className={`transaction-amount${isMine ? " self" : " partner"}`}>{formatCurrency(item.amount)}</span>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function StickyTotal({ summary }) {
+  const balance = Number(summary?.balance || 0);
+  return (
+    <div className="section-sticky-total">
+      <div className="expense-total-pill-react">
+        <span>Totale</span>
+        <strong>{formatCurrency(summary?.total_amount || 0)}</strong>
+      </div>
+      <div className="expense-balance-pill-react">
+        {balance > 0 ? `Mi devono ${formatCurrency(balance)}` : balance < 0 ? `Devo ${formatCurrency(Math.abs(balance))}` : "Siamo in pari"}
+      </div>
+    </div>
+  );
+}
+
+function ExpenseForm({ form, setForm, formError, payerOptions, categoryOptions, splitOptions, expenseTypeOptions, currentUsername }) {
+  const isPersonal = form.expense_type === "Personale";
+  const amount = Number(form.amount || 0);
+  const splitRatio = isPersonal ? 1 : Number(form.split_ratio || 0.5);
+  const payerShare = amount * splitRatio;
+  const partnerShare = amount - payerShare;
+  const paidByCurrentUser = form.paid_by === currentUsername || isPersonal;
+  const yourShare = paidByCurrentUser ? payerShare : partnerShare;
+  const otherShare = paidByCurrentUser ? partnerShare : payerShare;
+
+  return (
+    <div className="form-grid">
+      <label className="field">
+        <span>Data</span>
+        <input type="date" value={form.expense_date} onChange={(event) => setFormValue(setForm, "expense_date", event.target.value)} />
+      </label>
+      <label className="field">
+        <span>Importo</span>
+        <input type="number" min="0" step="0.01" value={form.amount} onChange={(event) => setFormValue(setForm, "amount", event.target.value)} />
+      </label>
+      <div className="amount-stepper field-span">
+        <button type="button" onClick={() => adjustAmount(setForm, -1)}>
+          −
+        </button>
+        <button type="button" onClick={() => adjustAmount(setForm, 1)}>
+          +
+        </button>
+      </div>
+      <label className="field field-span">
+        <span>Nome</span>
+        <input type="text" value={form.name} onChange={(event) => setFormValue(setForm, "name", event.target.value)} />
+      </label>
+      <label className="field">
+        <span>Categoria</span>
+        <select value={form.category} onChange={(event) => setFormValue(setForm, "category", event.target.value)}>
+          {categoryOptions.map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>Tipo spesa</span>
+        <select value={form.expense_type} onChange={(event) => updateExpenseType(setForm, event.target.value, currentUsername)}>
+          {expenseTypeOptions.map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>Pagata da</span>
+        <select value={isPersonal ? currentUsername : form.paid_by} disabled={isPersonal} onChange={(event) => setFormValue(setForm, "paid_by", event.target.value)}>
+          {payerOptions.map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>Divisione</span>
+        <select value={isPersonal ? "equal" : form.split_type} disabled={isPersonal} onChange={(event) => setFormValue(setForm, "split_type", event.target.value)}>
+          {splitOptions.map((option) => (
+            <option key={option} value={option}>{option === "equal" ? "50/50" : "Personalizzata"}</option>
+          ))}
+        </select>
+      </label>
+      {!isPersonal && form.split_type === "custom" ? (
+        <label className="field field-span">
+          <span>Quota di chi paga: {Math.round(splitRatio * 100)}%</span>
+          <input type="range" min="0" max="1" step="0.01" value={form.split_ratio} onChange={(event) => setFormValue(setForm, "split_ratio", Number(event.target.value))} />
+        </label>
+      ) : null}
+      <div className="split-preview field-span">
+        {isPersonal ? "Le spese personali restano private e fuori dal saldo." : `Tu: ${formatCurrency(yourShare)} / Partner: ${formatCurrency(otherShare)}`}
+      </div>
+      <label className="field field-span">
+        <span>Note</span>
+        <textarea rows="3" value={form.description} onChange={(event) => setFormValue(setForm, "description", event.target.value)} />
+      </label>
+      {formError ? <p className="error-message form-message">{formError}</p> : null}
+    </div>
+  );
 }
 
 function createDefaultExpenseForm(currentUsername) {
@@ -491,7 +635,6 @@ function createDefaultExpenseForm(currentUsername) {
     expense_type: "Condivisa",
     split_type: "equal",
     split_ratio: 0.5,
-    is_settled: false,
   };
 }
 
@@ -506,7 +649,6 @@ function normalizeExpenseForForm(item, currentUsername) {
     expense_type: item.expense_type || "Condivisa",
     split_type: item.split_type || "equal",
     split_ratio: Number(item.split_ratio ?? 0.5),
-    is_settled: Boolean(item.is_settled),
   };
 }
 
@@ -514,7 +656,6 @@ function buildExpensePayload(form, currentUsername) {
   const expenseType = form.expense_type;
   const splitType = expenseType === "Personale" ? "equal" : form.split_type;
   const splitRatio = expenseType === "Personale" ? 1.0 : Number(form.split_ratio);
-
   return {
     expense_date: form.expense_date,
     amount: Number(form.amount),
@@ -529,161 +670,57 @@ function buildExpensePayload(form, currentUsername) {
 }
 
 function validateExpenseForm(form) {
-  if (!form.expense_date) {
-    return "La data è obbligatoria.";
-  }
-  if (!form.name.trim()) {
-    return "Il nome della spesa è obbligatorio.";
-  }
-  if (!form.category) {
-    return "La categoria è obbligatoria.";
-  }
-  if (!form.description.trim()) {
-    return "La descrizione è obbligatoria.";
-  }
-  if (!form.amount || Number(form.amount) <= 0) {
-    return "L'importo deve essere maggiore di zero.";
-  }
-  if (form.expense_type === "Condivisa" && !form.paid_by) {
-    return "Seleziona chi ha pagato.";
-  }
+  if (!form.expense_date) return "La data e obbligatoria.";
+  if (!form.name.trim()) return "Il nome della spesa e obbligatorio.";
+  if (!form.category) return "La categoria e obbligatoria.";
+  if (!form.amount || Number(form.amount) <= 0) return "L'importo deve essere maggiore di zero.";
+  if (form.expense_type === "Condivisa" && !form.paid_by) return "Seleziona chi ha pagato.";
   return "";
 }
 
-function ExpenseForm({
-  form,
-  setForm,
-  formError,
-  payerOptions,
-  categoryOptions,
-  splitOptions,
-  expenseTypeOptions,
-  currentUsername,
-}) {
-  const isPersonal = form.expense_type === "Personale";
+function setFormValue(setForm, key, value) {
+  setForm((current) => ({ ...current, [key]: value }));
+}
 
-  return (
-    <div className="form-grid">
-      <label className="field">
-        <span>Data</span>
-        <input
-          type="date"
-          value={form.expense_date}
-          onChange={(event) => setForm((current) => ({ ...current, expense_date: event.target.value }))}
-        />
-      </label>
+function adjustAmount(setForm, delta) {
+  setForm((current) => {
+    const nextAmount = Math.max(0, Number(current.amount || 0) + delta);
+    return { ...current, amount: nextAmount.toFixed(2) };
+  });
+}
 
-      <label className="field">
-        <span>Importo</span>
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          value={form.amount}
-          onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))}
-        />
-      </label>
+function updateExpenseType(setForm, expenseType, currentUsername) {
+  setForm((current) => ({
+    ...current,
+    expense_type: expenseType,
+    paid_by: expenseType === "Personale" ? currentUsername : current.paid_by || currentUsername,
+    split_type: expenseType === "Personale" ? "equal" : current.split_type,
+    split_ratio: expenseType === "Personale" ? 1 : current.split_ratio || 0.5,
+  }));
+}
 
-      <label className="field field-span">
-        <span>Nome</span>
-        <input
-          type="text"
-          value={form.name}
-          onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-        />
-      </label>
+function formatCurrency(value) {
+  return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(Number(value || 0));
+}
 
-      <label className="field">
-        <span>Categoria</span>
-        <select
-          value={form.category}
-          onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))}
-        >
-          {categoryOptions.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-      </label>
+function formatShortDate(value) {
+  const date = new Date(`${value}T00:00:00`);
+  return new Intl.DateTimeFormat("it-IT", { day: "2-digit", month: "2-digit" }).format(date);
+}
 
-      <label className="field">
-        <span>Tipo spesa</span>
-        <select
-          value={form.expense_type}
-          onChange={(event) =>
-            setForm((current) => ({
-              ...current,
-              expense_type: event.target.value,
-              paid_by: event.target.value === "Personale" ? currentUsername : current.paid_by || currentUsername,
-              split_type: event.target.value === "Personale" ? "equal" : current.split_type,
-              split_ratio: event.target.value === "Personale" ? 1 : current.split_ratio || 0.5,
-            }))
-          }
-        >
-          {expenseTypeOptions.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-      </label>
+function formatMonthHeading(monthLabel) {
+  if (!monthLabel || monthLabel === "Tutti") {
+    return "Tutti i mesi";
+  }
+  const [year, month] = monthLabel.split("-");
+  const date = new Date(`${year}-${month}-01T00:00:00`);
+  return new Intl.DateTimeFormat("it-IT", { month: "long", year: "numeric" }).format(date);
+}
 
-      <label className="field field-span">
-        <span>Descrizione</span>
-        <textarea
-          rows="3"
-          value={form.description}
-          onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
-        />
-      </label>
+function getCurrentMonthLabel() {
+  return new Date().toISOString().slice(0, 7);
+}
 
-      <label className="field">
-        <span>Pagata da</span>
-        <select
-          value={isPersonal ? currentUsername : form.paid_by}
-          disabled={isPersonal}
-          onChange={(event) => setForm((current) => ({ ...current, paid_by: event.target.value }))}
-        >
-          {payerOptions.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="field">
-        <span>Divisione</span>
-        <select
-          value={isPersonal ? "equal" : form.split_type}
-          disabled={isPersonal}
-          onChange={(event) => setForm((current) => ({ ...current, split_type: event.target.value }))}
-        >
-          {splitOptions.map((option) => (
-            <option key={option} value={option}>
-              {option === "equal" ? "50/50" : "Personalizzata"}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {!isPersonal && form.split_type === "custom" ? (
-        <label className="field field-span">
-          <span>Quota di chi paga</span>
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={form.split_ratio}
-            onChange={(event) => setForm((current) => ({ ...current, split_ratio: Number(event.target.value) }))}
-          />
-          <small>{Math.round(Number(form.split_ratio) * 100)}%</small>
-        </label>
-      ) : null}
-
-      {formError ? <p className="error-message form-message">{formError}</p> : null}
-    </div>
-  );
+function sameObject(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }

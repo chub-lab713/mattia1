@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import calendar
 from datetime import date
 from html import escape
 from pathlib import Path
@@ -17,6 +16,7 @@ from services import (
     apply_filters,
     apply_income_filters,
     authenticate_user,
+    build_calendar_data,
     build_category_summary,
     build_dashboard_metrics,
     build_income_vs_expense_summary,
@@ -28,6 +28,7 @@ from services import (
     delete_expense,
     export_expenses_to_csv,
     export_expenses_to_pdf,
+    filter_couple_balance_expenses,
     format_currency,
     compute_balance,
     get_categories,
@@ -1429,14 +1430,16 @@ def inject_styles() -> None:
             .hero-visual-frame {
                 position: relative;
                 width: 100%;
-                max-width: 404px;
-                height: 214px;
+                max-width: 468px;
+                aspect-ratio: 3 / 2;
+                height: auto;
                 display: flex;
                 justify-content: center;
-                align-items: flex-start;
+                align-items: center;
                 overflow: hidden;
-                border-radius: 0;
-                background: transparent;
+                border-radius: 28px;
+                background: #eef0f4;
+                box-shadow: 0 18px 36px rgba(18, 13, 9, 0.10);
             }
             .hero-visual-frame::before {
                 content: none;
@@ -1446,16 +1449,16 @@ def inject_styles() -> None:
                 z-index: 1;
                 width: 100%;
                 height: 100%;
-                object-fit: contain;
-                object-position: center top;
-                border-radius: 0;
-                background: transparent;
+                object-fit: cover;
+                object-position: center center;
+                border-radius: 28px;
+                background: #eef0f4;
                 mix-blend-mode: normal;
-                filter: brightness(1.05) saturate(1.02) drop-shadow(0 12px 18px rgba(18, 13, 9, 0.12));
+                filter: brightness(1.02) saturate(1.02);
             }
             .home-summary-mini {
                 width: 100%;
-                max-width: 404px;
+                max-width: 468px;
                 margin-left: auto;
                 margin-right: auto;
                 padding: 0.64rem 0.74rem 0.58rem 0.74rem;
@@ -4118,91 +4121,52 @@ def render_calendar_section(expenses: pd.DataFrame, incomes: pd.DataFrame) -> No
         label_visibility="collapsed",
         key="calendar_content_filter",
     )
-    year, month_text = active_month_label.split("-")
-    year = int(year)
-    month = int(month_text)
 
-    month_expenses = expenses[expenses["month_label"] == active_month_label].copy() if not expenses.empty else expenses
-    month_incomes = incomes[incomes["month_label"] == active_month_label].copy() if not incomes.empty else incomes
-
-    if calendar_filter == "Entrate":
-        month_expenses = month_expenses.iloc[0:0].copy()
-    elif calendar_filter == "Uscite":
-        month_incomes = month_incomes.iloc[0:0].copy()
-
-    expense_day_totals = {}
-    if not month_expenses.empty:
-        expense_day_totals = (
-            month_expenses.groupby(month_expenses["expense_date"].dt.day)["amount"].sum().to_dict()
-        )
-
-    income_day_totals = {}
-    if not month_incomes.empty:
-        income_day_totals = (
-            month_incomes.groupby(month_incomes["income_date"].dt.day)["amount"].sum().to_dict()
-        )
-
-    expense_events: dict[int, list[str]] = {}
-    if not month_expenses.empty:
-        for _, row in month_expenses.sort_values("expense_date").iterrows():
-            day = int(row["expense_date"].day)
-            title = str(row.get("name") or row.get("description") or row.get("category") or "Spesa")
-            expense_events.setdefault(day, []).append(f"expense|{title}")
-
-    income_events: dict[int, list[str]] = {}
-    if not month_incomes.empty:
-        for _, row in month_incomes.sort_values("income_date").iterrows():
-            day = int(row["income_date"].day)
-            title = str(row.get("source") or row.get("description") or "Entrata")
-            income_events.setdefault(day, []).append(f"income|{title}")
-
-    weekdays = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
-    calendar_rows = calendar.Calendar(firstweekday=0).monthdatescalendar(year, month)
-    today = date.today()
+    calendar_data = build_calendar_data(
+        expenses,
+        incomes,
+        month_label=active_month_label,
+        content_filter=calendar_filter,
+        preview_limit=3,
+    )
 
     html_parts = [
         '<div class="calendar-shell">',
         '<div class="calendar-grid">',
     ]
 
-    for weekday in weekdays:
+    for weekday in calendar_data["weekdays"]:
         html_parts.append(f'<div class="calendar-weekday">{weekday}</div>')
 
-    for week in calendar_rows:
-        for day in week:
+    for week in calendar_data["weeks"]:
+        for day in week["days"]:
             classes = ["calendar-day"]
-            if day.month != month:
+            if not day["is_current_month"]:
                 classes.append("is-other-month")
-            if day == today:
+            if day["is_today"]:
                 classes.append("is-today")
 
-            day_events: list[str] = []
-            if day.month == month:
-                day_events.extend(expense_events.get(day.day, []))
-                day_events.extend(income_events.get(day.day, []))
-
             event_markup = []
-            for event in day_events[:3]:
-                event_type, label = event.split("|", 1)
+            for event in day["preview_events"]:
                 event_markup.append(
-                    f'<div class="calendar-event"><span class="calendar-event-dot {event_type}"></span><span class="calendar-event-text">{label}</span></div>'
+                    f'<div class="calendar-event"><span class="calendar-event-dot {event["type"]}"></span><span class="calendar-event-text">{escape(event["display_label"])}</span></div>'
                 )
-            if len(day_events) > 3:
+            if day["remaining_count"] > 0:
                 event_markup.append(
-                    f'<div class="calendar-event"><span class="calendar-event-text">+{len(day_events) - 3} altri</span></div>'
+                    f'<div class="calendar-event"><span class="calendar-event-text">+{day["remaining_count"]} altri</span></div>'
                 )
 
             total_text = ""
-            if day.month == month:
-                expense_total = float(expense_day_totals.get(day.day, 0.0))
-                income_total = float(income_day_totals.get(day.day, 0.0))
+            if day["is_current_month"]:
+                expense_total = float(day["total_expenses"])
+                income_total = float(day["total_incomes"])
                 if expense_total > 0 or income_total > 0:
                     total_text = f'<div class="calendar-day-total">Uscite {format_currency(expense_total)} · Entrate {format_currency(income_total)}</div>'
 
-            today_dot = '<span class="calendar-today-dot"></span>' if day == today else ""
+            today_dot = '<span class="calendar-today-dot"></span>' if day["is_today"] else ""
             html_parts.append(
                 f'<div class="{" ".join(classes)}">'
-                f'<div class="calendar-day-top"><div class="calendar-day-number">{day.day}</div>{today_dot}</div>'
+                f'<div class="calendar-day-top"><div class="calendar-day-number">{day["day_number"]}</div>{today_dot}</div>'
                 f"{total_text}"
                 f'<div class="calendar-event-list">{"".join(event_markup)}</div>'
                 "</div>"
@@ -4784,16 +4748,7 @@ def build_couple_balance_view_dataset(
     selected_status: str,
     selected_category: str,
 ) -> pd.DataFrame:
-    shared_expenses = dataframe.copy()
-    if selected_status == "Da regolare":
-        shared_expenses = shared_expenses[~shared_expenses["is_settled"].astype(bool)].copy()
-    elif selected_status == "Pagate":
-        shared_expenses = shared_expenses[shared_expenses["is_settled"].astype(bool)].copy()
-
-    if selected_category != "Tutte":
-        shared_expenses = shared_expenses[shared_expenses["category"] == selected_category].copy()
-
-    return shared_expenses
+    return filter_couple_balance_expenses(dataframe, selected_status, selected_category)
 
 
 def build_expense_view_dataset(
