@@ -164,3 +164,4 @@ La UI Streamlit  resta disponibile come interfaccia legacy.
 - Il comando consigliato `./run-dev.sh` non installa dipendenze: esegui prima `pip install -r requirements.txt` e `cd frontend && npm install`
 - Se la porta `5173` è occupata, Vite userà un'altra porta: usa quella mostrata nel terminale
 - FastAPI/React e Streamlit possono coesistere temporaneamente durante la migrazione
+# dioporco
