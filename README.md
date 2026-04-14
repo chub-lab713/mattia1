@@ -148,7 +148,7 @@ Il backend/API gestisce le funzioni principali del prodotto:
 - filtri, visibilità e ownership dei dati
 
 La nuova UI React usa queste API come frontend principale in sviluppo.
-La UI Streamlit resta disponibile come interfaccia legacy.
+La UI Streamlit  resta disponibile come interfaccia legacy.
 
 ## Credenziali demo
 
