@@ -58,6 +58,7 @@ def initialize_database() -> None:
                 owner TEXT,
                 split_type TEXT NOT NULL DEFAULT 'equal',
                 split_ratio REAL NOT NULL DEFAULT 0.5,
+                is_settled INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -81,26 +82,22 @@ def initialize_database() -> None:
         )
         _ensure_income_owner_column(connection)
 
-        users_count = connection.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
-        if users_count == 0:
+        existing_usernames = {
+            row["username"]
+            for row in connection.execute("SELECT username FROM users").fetchall()
+        }
+        users_to_insert = []
+        if "io" not in existing_usernames:
+            users_to_insert.append(("Mattia", "io", "", _hash_password("")))
+        if "compagna" not in existing_usernames:
+            users_to_insert.append(("Compagna", "compagna", "", _hash_password("demo123")))
+        if users_to_insert:
             connection.executemany(
                 """
                 INSERT INTO users (full_name, username, email, password_hash)
                 VALUES (?, ?, ?, ?)
                 """,
-                [
-                    ("Mattia", "io", "", _hash_password("")),
-                    ("Compagna", "compagna", "", _hash_password("demo123")),
-                ],
-            )
-        else:
-            connection.execute(
-                """
-                UPDATE users
-                SET full_name = ?, password_hash = ?
-                WHERE username = ?
-                """,
-                ("Mattia", _hash_password(""), "io"),
+                users_to_insert,
             )
 
         usernames = [
@@ -166,19 +163,20 @@ def initialize_database() -> None:
                     expense_type,
                     owner,
                     split_type,
-                    split_ratio
+                    split_ratio,
+                    is_settled
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    ("2026-03-02", 45.50, "Supermercato", "Spesa", "Supermercato settimanale", primary_username, "Condivisa", None, "equal", 0.5),
-                    ("2026-03-05", 18.90, "Benzina scooter", "Trasporti", "Benzina scooter", primary_username, "Personale", primary_username, "equal", 1.0),
-                    ("2026-03-07", 72.00, "Bollette luce", "Casa", "Bollette luce", secondary_username, "Condivisa", None, "equal", 0.5),
-                    ("2026-03-10", 25.00, "Cinema", "Svago", "Cinema", secondary_username, "Condivisa", None, "custom", 0.4),
-                    ("2026-03-12", 32.00, "Farmacia", "Salute", "Farmacia", secondary_username, "Personale", secondary_username, "equal", 1.0),
-                    ("2026-02-18", 120.00, "Internet mensile", "Casa", "Internet mensile", primary_username, "Condivisa", None, "equal", 0.5),
-                    ("2026-02-22", 54.90, "Cena fuori", "Ristoranti", "Cena fuori", primary_username, "Condivisa", None, "custom", 0.6),
-                    ("2026-01-28", 89.99, "Corso online", "Abbonamenti", "Corso online", primary_username, "Personale", primary_username, "equal", 1.0),
+                    ("2026-03-02", 45.50, "Supermercato", "Spesa", "Supermercato settimanale", primary_username, "Condivisa", None, "equal", 0.5, 0),
+                    ("2026-03-05", 18.90, "Benzina scooter", "Trasporti", "Benzina scooter", primary_username, "Personale", primary_username, "equal", 1.0, 0),
+                    ("2026-03-07", 72.00, "Bollette luce", "Casa", "Bollette luce", secondary_username, "Condivisa", None, "equal", 0.5, 0),
+                    ("2026-03-10", 25.00, "Cinema", "Svago", "Cinema", secondary_username, "Condivisa", None, "custom", 0.4, 0),
+                    ("2026-03-12", 32.00, "Farmacia", "Salute", "Farmacia", secondary_username, "Personale", secondary_username, "equal", 1.0, 0),
+                    ("2026-02-18", 120.00, "Internet mensile", "Casa", "Internet mensile", primary_username, "Condivisa", None, "equal", 0.5, 0),
+                    ("2026-02-22", 54.90, "Cena fuori", "Ristoranti", "Cena fuori", primary_username, "Condivisa", None, "custom", 0.6, 0),
+                    ("2026-01-28", 89.99, "Corso online", "Abbonamenti", "Corso online", primary_username, "Personale", primary_username, "equal", 1.0, 0),
                 ],
             )
 
@@ -224,6 +222,7 @@ def _migrate_expenses_schema_if_needed(connection: sqlite3.Connection) -> None:
         or "owner" not in existing_names
         or "split_type" not in existing_names
         or "split_ratio" not in existing_names
+        or "is_settled" not in existing_names
         or "payer" in existing_names
         or "my_share_percentage" in existing_names
     )
@@ -248,6 +247,7 @@ def _migrate_expenses_schema_if_needed(connection: sqlite3.Connection) -> None:
         else "'equal'"
     )
     source_split_ratio_expr = "0.5"
+    source_is_settled_expr = "COALESCE(is_settled, 0)" if "is_settled" in existing_names else "0"
 
     connection.execute("DROP TABLE IF EXISTS expenses_new")
     connection.execute(
@@ -264,6 +264,7 @@ def _migrate_expenses_schema_if_needed(connection: sqlite3.Connection) -> None:
             owner TEXT,
             split_type TEXT NOT NULL DEFAULT 'equal',
             split_ratio REAL NOT NULL DEFAULT 0.5,
+            is_settled INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -283,6 +284,7 @@ def _migrate_expenses_schema_if_needed(connection: sqlite3.Connection) -> None:
             owner,
             split_type,
             split_ratio,
+            is_settled,
             created_at,
             updated_at
         )
@@ -315,6 +317,10 @@ def _migrate_expenses_schema_if_needed(connection: sqlite3.Connection) -> None:
             CASE
                 WHEN expense_type = 'Personale' THEN 1.0
                 ELSE {source_split_ratio_expr}
+            END,
+            CASE
+                WHEN expense_type = 'Personale' THEN 0
+                ELSE {source_is_settled_expr}
             END,
             created_at,
             updated_at

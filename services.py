@@ -89,6 +89,10 @@ def get_usernames() -> list[str]:
 
 def get_couple_usernames() -> tuple[str, str]:
     usernames = get_usernames()
+    if len(usernames) >= 2:
+        first = usernames[-2]
+        second = usernames[-1]
+        return first, second
     first = usernames[0] if usernames else "io"
     second = usernames[1] if len(usernames) > 1 else "compagna"
     return first, second
@@ -116,31 +120,62 @@ def update_user_profile(
         return False, "Lo username non puo essere vuoto.", None
 
     with get_connection() as connection:
-        existing = connection.execute(
-            "SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id != ?",
-            (clean_username, user_id),
-        ).fetchone()
-        if existing is not None:
-            return False, "Questo username e gia in uso.", None
+        try:
+            connection.execute("BEGIN")
+            current_user = connection.execute(
+                "SELECT username FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if current_user is None:
+                connection.rollback()
+                return False, "Utente non trovato.", None
 
-        if new_password.strip():
-            connection.execute(
-                """
-                UPDATE users
-                SET full_name = ?, username = ?, email = ?, password_hash = ?
-                WHERE id = ?
-                """,
-                (clean_name, clean_username, clean_email, hashlib.sha256(new_password.encode("utf-8")).hexdigest(), user_id),
-            )
-        else:
-            connection.execute(
-                """
-                UPDATE users
-                SET full_name = ?, username = ?, email = ?
-                WHERE id = ?
-                """,
-                (clean_name, clean_username, clean_email, user_id),
-            )
+            old_username = current_user["username"]
+            existing = connection.execute(
+                "SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id != ?",
+                (clean_username, user_id),
+            ).fetchone()
+            if existing is not None:
+                connection.rollback()
+                return False, "Questo username e gia in uso.", None
+
+            if new_password.strip():
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET full_name = ?, username = ?, email = ?, password_hash = ?
+                    WHERE id = ?
+                    """,
+                    (clean_name, clean_username, clean_email, hashlib.sha256(new_password.encode("utf-8")).hexdigest(), user_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET full_name = ?, username = ?, email = ?
+                    WHERE id = ?
+                    """,
+                    (clean_name, clean_username, clean_email, user_id),
+                )
+
+            if old_username != clean_username:
+                connection.execute(
+                    "UPDATE expenses SET paid_by = ? WHERE paid_by = ?",
+                    (clean_username, old_username),
+                )
+                connection.execute(
+                    "UPDATE expenses SET owner = ? WHERE owner = ?",
+                    (clean_username, old_username),
+                )
+                connection.execute(
+                    "UPDATE incomes SET owner = ? WHERE owner = ?",
+                    (clean_username, old_username),
+                )
+
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
     updated_user = get_user_by_id(user_id)
     return True, "Profilo aggiornato con successo.", updated_user
@@ -249,9 +284,10 @@ def create_expense(
                 expense_type,
                 owner,
                 split_type,
-                split_ratio
+                split_ratio,
+                is_settled
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 expense_date.isoformat(),
@@ -264,6 +300,7 @@ def create_expense(
                 owner,
                 split_type,
                 split_ratio,
+                0,
             ),
         )
 
@@ -312,8 +349,50 @@ def create_income(
         )
 
 
+def update_income(
+    income_id: int,
+    current_username: str,
+    income_date: date,
+    amount: float,
+    source: str,
+    description: str,
+) -> bool:
+    with get_connection() as connection:
+        result = connection.execute(
+            """
+            UPDATE incomes
+            SET
+                income_date = ?,
+                amount = ?,
+                source = ?,
+                description = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND owner = ?
+            """,
+            (
+                income_date.isoformat(),
+                amount,
+                source.strip(),
+                description.strip(),
+                income_id,
+                current_username,
+            ),
+        )
+    return result.rowcount > 0
+
+
+def delete_income(income_id: int, current_username: str) -> bool:
+    with get_connection() as connection:
+        result = connection.execute(
+            "DELETE FROM incomes WHERE id = ? AND owner = ?",
+            (income_id, current_username),
+        )
+    return result.rowcount > 0
+
+
 def update_expense(
     expense_id: int,
+    current_username: str,
     expense_date: date,
     amount: float,
     name: str,
@@ -323,13 +402,17 @@ def update_expense(
     expense_type: str,
     split_type: str = "equal",
     split_ratio: float = 0.5,
-) -> None:
+) -> bool:
+    existing_expense = get_expense_by_id(expense_id, current_username)
+    if existing_expense is None:
+        return False
+
     owner = paid_by if expense_type == "Personale" else None
     if expense_type == "Personale":
         split_type = "equal"
         split_ratio = 1.0
     with get_connection() as connection:
-        connection.execute(
+        result = connection.execute(
             """
             UPDATE expenses
             SET
@@ -343,6 +426,7 @@ def update_expense(
                 owner = ?,
                 split_type = ?,
                 split_ratio = ?,
+                is_settled = CASE WHEN ? = 'Personale' THEN 0 ELSE is_settled END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
@@ -357,14 +441,21 @@ def update_expense(
                 owner,
                 split_type,
                 split_ratio,
+                expense_type,
                 expense_id,
             ),
         )
+    return result.rowcount > 0
 
 
-def delete_expense(expense_id: int) -> None:
+def delete_expense(expense_id: int, current_username: str) -> bool:
+    existing_expense = get_expense_by_id(expense_id, current_username)
+    if existing_expense is None:
+        return False
+
     with get_connection() as connection:
-        connection.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        result = connection.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+    return result.rowcount > 0
 
 
 def get_expenses() -> pd.DataFrame:
@@ -383,6 +474,7 @@ def get_expenses() -> pd.DataFrame:
                 owner,
                 split_type,
                 split_ratio,
+                is_settled,
                 created_at,
                 updated_at
             FROM expenses
@@ -396,7 +488,29 @@ def get_expenses() -> pd.DataFrame:
 
     dataframe["expense_date"] = pd.to_datetime(dataframe["expense_date"])
     dataframe["month_label"] = dataframe["expense_date"].dt.strftime("%Y-%m")
+    dataframe["is_settled"] = dataframe["is_settled"].fillna(0).astype(bool)
     return dataframe
+
+
+def get_shared_expenses() -> pd.DataFrame:
+    shared_expenses = get_expenses()
+    if shared_expenses.empty:
+        return shared_expenses
+    return shared_expenses[shared_expenses["expense_type"] == "Condivisa"].copy()
+
+
+def update_expense_settled(expense_id: int, status: bool) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE expenses
+            SET
+                is_settled = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (1 if status else 0, expense_id),
+        )
 
 
 def get_visible_expenses(dataframe: pd.DataFrame, current_username: str) -> pd.DataFrame:
@@ -442,6 +556,33 @@ def get_visible_incomes(dataframe: pd.DataFrame, current_username: str) -> pd.Da
     return dataframe[dataframe["owner"] == current_username].copy()
 
 
+def get_income_by_id(income_id: int, current_username: str) -> dict | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                income_date,
+                amount,
+                source,
+                description,
+                owner,
+                created_at,
+                updated_at
+            FROM incomes
+            WHERE id = ? AND owner = ?
+            """,
+            (income_id, current_username),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    income = dict(row)
+    income["income_date"] = pd.to_datetime(income["income_date"]).date()
+    return income
+
+
 def apply_income_filters(dataframe: pd.DataFrame, month_label: str | None) -> pd.DataFrame:
     filtered = dataframe.copy()
     if month_label and month_label != "Tutti":
@@ -478,8 +619,7 @@ def build_dashboard_metrics(month_dataframe: pd.DataFrame, current_username: str
     ]["amount"].sum()
 
     shared_total = month_dataframe[month_dataframe["expense_type"] == "Condivisa"]["amount"].sum()
-    partner_username = get_partner_username(current_username)
-    balance = compute_balance(current_username, partner_username, month_dataframe)
+    balance = compute_couple_balance(current_username, month_dataframe)
 
     return {
         "total_month": float(total_month),
@@ -533,6 +673,8 @@ def compute_balance(user1: str, user2: str, dataframe: pd.DataFrame) -> float:
         return 0.0
 
     shared = dataframe[dataframe["expense_type"] == "Condivisa"]
+    if "is_settled" in shared.columns:
+        shared = shared[~shared["is_settled"].astype(bool)]
     balance = 0.0
 
     for _, row in shared.iterrows():
@@ -544,6 +686,24 @@ def compute_balance(user1: str, user2: str, dataframe: pd.DataFrame) -> float:
             balance -= partner_share
 
     return round(float(balance), 2)
+
+
+def compute_couple_balance(current_username: str, dataframe: pd.DataFrame | None = None) -> float:
+    if not current_username:
+        return 0.0
+
+    shared_expenses = dataframe.copy() if dataframe is not None else get_shared_expenses()
+    if shared_expenses.empty:
+        return 0.0
+
+    shared_expenses = shared_expenses[shared_expenses["expense_type"] == "Condivisa"].copy()
+    if "is_settled" in shared_expenses.columns:
+        shared_expenses = shared_expenses[~shared_expenses["is_settled"].astype(bool)]
+    if shared_expenses.empty:
+        return 0.0
+
+    partner_username = get_partner_username(current_username)
+    return compute_balance(current_username, partner_username, shared_expenses)
 
 
 def get_month_options(dataframe: pd.DataFrame) -> list[str]:
@@ -558,7 +718,7 @@ def get_month_options(dataframe: pd.DataFrame) -> list[str]:
     return ["Tutti"] + months
 
 
-def get_expense_by_id(expense_id: int) -> dict | None:
+def get_expense_by_id(expense_id: int, current_username: str) -> dict | None:
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,)).fetchone()
 
@@ -566,6 +726,8 @@ def get_expense_by_id(expense_id: int) -> dict | None:
         return None
 
     expense = dict(row)
+    if not _can_access_expense(expense, current_username):
+        return None
     expense["expense_date"] = datetime.strptime(expense["expense_date"], "%Y-%m-%d").date()
     return expense
 
@@ -724,3 +886,11 @@ def _format_split_label(row: pd.Series) -> str:
     if split_type == "custom":
         return f"Personalizzata {int(payer_share * 100)}% / {int(partner_share * 100)}%"
     return "50/50"
+
+
+def _can_access_expense(expense: dict, current_username: str) -> bool:
+    if not current_username:
+        return False
+    if expense.get("expense_type") == "Personale":
+        return expense.get("owner") == current_username
+    return current_username in get_couple_usernames()
